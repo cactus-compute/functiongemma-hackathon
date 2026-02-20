@@ -13,8 +13,14 @@
 - You will be objectively ranked on tool-call correctness, speed and edge/cloud ratio (priortize local). 
 - You can focus on prompting, tool description patterns, confidence score algorithms, anything!
 
-## Qualitative Judging & Pointers
-- Top 10 performing on the objective score, on hidden evals, will proceed to subjective judging.
+## Submissions
+- Do not modify the `generate_hybrid` keep the hybrid interface compatible with benchmark.py.
+- Submit to the leaderboard `python submit.py --team "YourTeamName"`, 1x every 10mins.
+- The dataset is a hidden Cactus eval, EXTREMELY difficult for FunctionGemma by design.
+- For transparency, hackers can see live rankings on the [leaderboard](https://khalilah-unbibulous-carlena.ngrok-free.dev), 
+- The top 10 in each location will make it to judging.
+
+## Qualitative Judging 
 - **Rubric 1**: The quality of your hybrid routing algorithm, depth and cleverness.
 - **Rubric 2**: End-to-end products that execute function calls to solve real-world problems. 
 - **Rubric 3**: Building low-latency voice-to-action products, leveraging `cactus_transcribe`.
@@ -30,12 +36,14 @@
 - Step 8: `pip install google-genai`
 - Step 9: Obtain Gemini API key from [Google AI Studio](https://aistudio.google.com/api-keys)
 - Step 10: `export GEMINI_API_KEY="your-api-key-here"`
-- Step 11: read and run `python example.py`
-- Step 12: read and run `python benchmark.py` to understand how objective scoring works.
+- Step 11: Join the [Reddit channel](https://www.reddit.com/r/cactuscompute/), ask any technical questions there.
+- Step 12: read and run `python example.py`
+- Step 13: read and run `python benchmark.py` to understand how objective scoring works.
 - Note: Final objective score will be done on held-out evals, top 10 are then judged subjectively.
 
 ## Submissions
 - Do not modify the `generate_hybrid` keep the hybrid interface compatible with benchmark.py.
+- Submit to the leaderboard `python submit.py --team "YourTeamName"`
 - Record a demo video, and submit along with your demo video. 
 - Submission link will be provided!
 
@@ -234,5 +242,3 @@ for chunk in chunks:
 
 ## Next steps:
 - Join the [Reddit channel](https://www.reddit.com/r/cactuscompute/), ask any technical questions there.
-- Use [Google's AI studio](https://aistudio.google.com/prompts/new_chat) to ierate on Gemini, you 
-- Run `example.py` and take it from there!

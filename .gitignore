@@ -207,3 +207,9 @@ marimo/_lsp/
 __marimo__/
 
 cactus
+
+# Eval server (contains held-out evals and scoring)
+server/
+
+# Leaderboard data
+docs/
