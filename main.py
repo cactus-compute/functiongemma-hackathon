@@ -4,6 +4,7 @@ sys.path.insert(0, "cactus/python/src")
 functiongemma_path = "cactus/weights/functiongemma-270m-it"
 
 import json, os, time
+from concurrent.futures import ThreadPoolExecutor
 from cactus import cactus_init, cactus_complete, cactus_destroy
 from google import genai
 from google.genai import types
@@ -95,22 +96,91 @@ def generate_cloud(messages, tools):
 
 
 def generate_hybrid(messages, tools, confidence_threshold=0.99):
-    """Baseline hybrid inference strategy; fall back to cloud if Cactus Confidence is below threshold."""
-    local = generate_cactus(messages, tools)
+    """Hybrid strategy: neural decomposition via FunctionGemma, then fan-out."""
+    user_text = next(
+        (m["content"] for m in reversed(messages) if m["role"] == "user"), ""
+    )
 
-    # Cloud pathway disabled - uncomment to restore
-    # if local["confidence"] >= confidence_threshold:
-    #     local["source"] = "on-device"
-    #     return local
-    #
-    # cloud = generate_cloud(messages, tools)
-    # cloud["source"] = "cloud (fallback)"
-    # cloud["local_confidence"] = local["confidence"]
-    # cloud["total_time_ms"] += local["total_time_ms"]
-    # return cloud
+    # --- neural classification + decomposition in one FunctionGemma call ---
+    start = time.time()
+    decompose_tool = [{
+        "type": "function",
+        "function": {
+            "name": "decompose_query",
+            "description": "Break a user request into simple, single-action sub-queries. "
+                           "If the request is already a single action, return it as-is in a one-element list.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "subqueries": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "List of simple sub-queries",
+                    }
+                },
+                "required": ["subqueries"],
+            },
+        },
+    }]
+    model = cactus_init(functiongemma_path)
+    raw_str = cactus_complete(
+        model,
+        [{
+            "role": "system", 
+            "content": "You are a query decomposer. Use the decompose_query tool to break multi-hop queries into simple single-hop queries. If the query is single-hop native, return the query as is."
+        },
+         {"role": "user", "content": user_text}],
+        tools=decompose_tool,
+        force_tools=True,
+        max_tokens=256,
+        stop_sequences=["<|im_end|>", "<end_of_turn>"],
+    )
+    cactus_destroy(model)
 
-    local["source"] = "on-device"
-    return local
+    sub_queries = None
+    try:
+        raw = json.loads(raw_str)
+        for fc in raw.get("function_calls", []):
+            subs = fc.get("arguments", {}).get("subqueries", [])
+            if isinstance(subs, list) and subs:
+                sub_queries = [s for s in subs if isinstance(s, str) and s.strip()]
+                break
+    except (json.JSONDecodeError, KeyError, TypeError):
+        pass
+
+    decompose_ms = (time.time() - start) * 1000
+
+    # Model returned <=1 sub-query -> simple request, run directly with original messages
+    if not sub_queries or len(sub_queries) <= 1:
+        local = generate_cactus(messages, tools)
+        local["total_time_ms"] += decompose_ms
+        local["source"] = "on-device"
+        return local
+
+    # --- compound: fan-out sub-queries concurrently ---
+    def _run_subquery(sq):
+        return generate_cactus([{"role": "user", "content": sq}], tools)
+
+    fan_start = time.time()
+    with ThreadPoolExecutor(max_workers=len(sub_queries)) as pool:
+        results = list(pool.map(_run_subquery, sub_queries))
+    fan_ms = (time.time() - fan_start) * 1000
+
+    all_calls = []
+    seen = set()
+    for r in results:
+        for fc in r.get("function_calls", []):
+            key = (fc.get("name"), json.dumps(fc.get("arguments", {}), sort_keys=True))
+            if key not in seen:
+                seen.add(key)
+                all_calls.append(fc)
+
+    return {
+        "function_calls": all_calls,
+        "total_time_ms": decompose_ms + fan_ms,
+        "confidence": min((r.get("confidence", 0) for r in results), default=0),
+        "source": "on-device",
+    }
 
 
 def print_result(label, result):
