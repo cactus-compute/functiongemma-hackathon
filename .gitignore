@@ -213,3 +213,8 @@ server/
 
 # Leaderboard data
 docs/
+
+# Alternate benchmark (local test set)
+benchmark_alt.py
+benchmark_v3.py
+benchmark_v4.py

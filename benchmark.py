@@ -406,6 +406,13 @@ def run_benchmark(benchmarks=None):
         print(f"[{i}/{total}] Running: {case['name']} ({case['difficulty']})...", end=" ", flush=True)
         result = generate_hybrid(case["messages"], case["tools"])
         f1 = compute_f1(result["function_calls"], case["expected_calls"])
+        
+        if f1 == 0.0 and result.get("source") == "on-device":
+            print(f"\n--- DEBUG {case['name']} ---")
+            print(f"EXPECTED: {case['expected_calls']}")
+            print(f"ACTUAL:   {result['function_calls']}")
+            print("------------------------\n")
+            
         source = result.get("source", "unknown")
         print(f"F1={f1:.2f} | {result['total_time_ms']:.0f}ms | {source}")
         results.append({
