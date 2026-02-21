@@ -13,6 +13,7 @@ DEFAULT_LOCAL_TEMPERATURE = 0.0
 DEFAULT_CLOUD_TEMPERATURE = 0.0
 DEFAULT_MAX_TOKENS = 256
 DEFAULT_STOP_SEQUENCES = ["<|im_end|>", "<end_of_turn>"]
+DEFAULT_CLOUD_MODEL_FALLBACKS = ["gemini-2.5-flash", "gemini-2.5-pro"]
 
 DEFAULT_SYSTEM_INSTRUCTION = "You are a helpful assistant that can use tools."
 REPAIR_SYSTEM_INSTRUCTION = (
@@ -193,16 +194,34 @@ def _run_cloud(messages, tools, system_instruction=None):
     else:
         contents = [m["content"] for m in messages if m["role"] == "user"]
 
-    start_time = time.time()
+    configured_model = os.environ.get("GEMINI_MODEL", "").strip()
+    model_candidates = []
+    if configured_model:
+        model_candidates.append(configured_model)
+    for fallback_model in DEFAULT_CLOUD_MODEL_FALLBACKS:
+        if fallback_model not in model_candidates:
+            model_candidates.append(fallback_model)
 
-    gemini_response = client.models.generate_content(
-        model="gemini-2.0-flash",
-        contents=contents,
-        config=types.GenerateContentConfig(
-            tools=gemini_tools,
-            temperature=DEFAULT_CLOUD_TEMPERATURE,
-        ),
-    )
+    start_time = time.time()
+    gemini_response = None
+    last_error = None
+    for model_name in model_candidates:
+        try:
+            gemini_response = client.models.generate_content(
+                model=model_name,
+                contents=contents,
+                config=types.GenerateContentConfig(
+                    tools=gemini_tools,
+                    temperature=DEFAULT_CLOUD_TEMPERATURE,
+                ),
+            )
+            break
+        except Exception as error:
+            last_error = error
+            continue
+
+    if gemini_response is None:
+        raise last_error if last_error is not None else RuntimeError("Gemini cloud call failed")
 
     total_time_ms = (time.time() - start_time) * 1000
 
