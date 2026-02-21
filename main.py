@@ -369,6 +369,17 @@ def generate_hybrid(messages, tools, confidence_threshold=0.99):
             out.append(call)
         return out
 
+    def _split_clauses(text):
+        t = _norm_text(text)
+        if not t:
+            return []
+        parts = re.split(
+            r"\s*(?:,|;|\band then\b|\bthen\b|\balso\b|\bplus\b|\band\b)\s*",
+            t,
+            flags=re.IGNORECASE,
+        )
+        return [p.strip(" .") for p in parts if p and p.strip(" .")]
+
     def _schema_valid(call):
         name = call.get("name")
         args = call.get("arguments", {})
@@ -417,6 +428,12 @@ def generate_hybrid(messages, tools, confidence_threshold=0.99):
                     # Multi-token string args should usually be contiguous in user text.
                     if len(v_tokens) >= 2 and val not in user_text_l:
                         overlap = min(overlap, 0.4)
+                    # For time-like strings, mismatched hour token should be heavily penalized.
+                    if any(tok in v_tokens for tok in {"am", "pm"}):
+                        cand_hours = {tok for tok in v_tokens if tok.isdigit() and 1 <= int(tok) <= 12}
+                        user_hours = {tok for tok in user_tokens if tok.isdigit() and 1 <= int(tok) <= 12}
+                        if cand_hours and user_hours and not (cand_hours & user_hours):
+                            overlap = min(overlap, 0.1)
                     if "@" in val and "@" not in user_text:
                         overlap *= 0.1
                     score += overlap
@@ -540,6 +557,32 @@ def generate_hybrid(messages, tools, confidence_threshold=0.99):
         res["function_calls"] = calls
         return res
 
+    def _run_segmented_committee():
+        clauses = _split_clauses(user_text)
+        if len(clauses) < 2:
+            return {"function_calls": [], "confidence": 0.0, "total_time_ms": 0.0}
+        all_calls = []
+        confidences = []
+        total_ms = 0.0
+        for clause in clauses[:4]:
+            clause_msgs = [{"role": "user", "content": clause}]
+            seg = generate_cactus(clause_msgs, tools)
+            seg_calls = [_canonicalize_call(c) for c in seg.get("function_calls", [])]
+            seg_calls = [c for c in seg_calls if c.get("name") in tool_map]
+            seg_calls = _dedupe_calls(seg_calls)
+            # Keep top 1 call per clause to reduce over-generation noise.
+            if seg_calls:
+                best_call = max(
+                    seg_calls,
+                    key=lambda c: (1 if _schema_valid(c) else 0, _arg_grounding(c), _plausibility(c)),
+                )
+                all_calls.append(best_call)
+            confidences.append(float(seg.get("confidence", 0.0) or 0.0))
+            total_ms += float(seg.get("total_time_ms", 0.0) or 0.0)
+        all_calls = _dedupe_calls(all_calls)
+        mean_conf = sum(confidences) / len(confidences) if confidences else 0.0
+        return {"function_calls": all_calls, "confidence": mean_conf, "total_time_ms": total_ms}
+
     action_hint = max(1, min(4, 1 + len(re.findall(r"\b(?:and|then|also)\b|,", user_text.lower()))))
 
     base = _run_local()
@@ -573,9 +616,22 @@ def generate_hybrid(messages, tools, confidence_threshold=0.99):
     verify_quality = _call_quality(verify_calls)
     consensus = _signature(base_calls) == _signature(verify_calls)
 
+    segmented = _run_segmented_committee()
+    seg_calls = segmented.get("function_calls", [])
+    seg_conf = float(segmented.get("confidence", 0.0) or 0.0)
+    seg_schema = _schema_rate(seg_calls)
+    seg_quality = _call_quality(seg_calls)
+
     selected = base
     if (verify_schema, verify_quality, verify_conf) > (base_schema, base_quality, base_conf):
         selected = verify
+    if (seg_schema, seg_quality, _coverage(seg_calls, action_hint), seg_conf) > (
+        _schema_rate(selected.get("function_calls", [])),
+        _call_quality(selected.get("function_calls", [])),
+        _coverage(selected.get("function_calls", []), action_hint),
+        float(selected.get("confidence", 0.0) or 0.0),
+    ):
+        selected = segmented
     selected_calls = selected.get("function_calls", [])
     selected_conf = float(selected.get("confidence", 0.0) or 0.0)
     selected_schema = _schema_rate(selected_calls)
@@ -651,13 +707,17 @@ def generate_hybrid(messages, tools, confidence_threshold=0.99):
         cloud["function_calls"] = best_calls
         cloud["source"] = "cloud (fallback)"
         cloud["local_confidence"] = selected_conf
-        cloud["total_time_ms"] += base.get("total_time_ms", 0) + verify.get("total_time_ms", 0)
+        cloud["total_time_ms"] += (
+            base.get("total_time_ms", 0) + verify.get("total_time_ms", 0) + segmented.get("total_time_ms", 0)
+        )
         cloud["fallback_reason"] = {
             "consensus": consensus,
             "base_schema_rate": base_schema,
             "verify_schema_rate": verify_schema,
+            "segmented_schema_rate": seg_schema,
             "base_quality": base_quality,
             "verify_quality": verify_quality,
+            "segmented_quality": seg_quality,
             "selected_schema_rate": selected_schema,
             "selected_quality": selected_quality,
             "selected_call_count_ok": call_count_ok,
@@ -676,8 +736,10 @@ def generate_hybrid(messages, tools, confidence_threshold=0.99):
                 "consensus": consensus,
                 "base_schema_rate": base_schema,
                 "verify_schema_rate": verify_schema,
+                "segmented_schema_rate": seg_schema,
                 "base_quality": base_quality,
                 "verify_quality": verify_quality,
+                "segmented_quality": seg_quality,
                 "selected_schema_rate": selected_schema,
                 "selected_quality": selected_quality,
                 "local_confidence": selected_conf,
