@@ -1,0 +1,96 @@
+[
+  {
+    "name": "Sarah Chen",
+    "role": "ML Engineer",
+    "company": "DeepMind",
+    "bio": "Building on-device AI for edge inference.",
+    "skills": ["Python", "PyTorch", "TensorFlow Lite", "C++"],
+    "looking_for": ["Co-founder", "Collaborators"],
+    "can_help_with": ["Technical advice", "Product feedback"],
+    "domains": ["AI/ML", "Hardware"],
+    "linkedin_url": "https://linkedin.com/in/sarahchen"
+  },
+  {
+    "name": "Alex Rivera",
+    "role": "Product Manager",
+    "company": "Google",
+    "bio": "Shipping consumer AI products at scale.",
+    "skills": ["Product Strategy", "Data Analysis", "SQL", "A/B Testing"],
+    "looking_for": ["Investors", "Mentorship"],
+    "can_help_with": ["Product feedback", "Introductions"],
+    "domains": ["Consumer", "Enterprise SaaS"],
+    "linkedin_url": ""
+  },
+  {
+    "name": "Maya Patel",
+    "role": "Principal Product Designer",
+    "company": "Figma",
+    "bio": "10+ years designing world-class products. Led design systems at Airbnb and Figma. Passionate about accessible, delightful UX.",
+    "skills": ["UI/UX Design", "Design Systems", "Figma", "User Research", "Prototyping", "Visual Design", "Interaction Design"],
+    "looking_for": ["Collaborators", "Mentorship"],
+    "can_help_with": ["Design", "Product feedback", "Technical advice"],
+    "domains": ["AI/ML", "Consumer", "Developer Tools"],
+    "linkedin_url": "https://linkedin.com/in/mayapatel",
+    "_design_match_target": "~82%"
+  },
+  {
+    "name": "Jordan Lee",
+    "role": "Senior UX Designer",
+    "company": "Stripe",
+    "bio": "Designing fintech experiences that simplify complexity. Strong in user research and interaction design.",
+    "skills": ["UX Design", "User Research", "Figma", "Prototyping", "Wireframing"],
+    "looking_for": ["Co-founder", "Collaborators"],
+    "can_help_with": ["Design", "Product feedback"],
+    "domains": ["FinTech", "Enterprise SaaS"],
+    "linkedin_url": "https://linkedin.com/in/jordanlee",
+    "_design_match_target": "~75%"
+  },
+  {
+    "name": "Chris Wong",
+    "role": "Product Designer",
+    "company": "Notion",
+    "bio": "3 years designing productivity tools. Learning design systems and growing into senior roles.",
+    "skills": ["UI Design", "Figma", "Sketch", "Basic Prototyping"],
+    "looking_for": ["Mentorship", "Collaborators"],
+    "can_help_with": ["Design", "Product feedback"],
+    "domains": ["Consumer", "Developer Tools"],
+    "linkedin_url": "https://linkedin.com/in/chriswong",
+    "_design_match_target": "~65%"
+  },
+  {
+    "name": "Taylor Kim",
+    "role": "Product Manager",
+    "company": "Dropbox",
+    "bio": "PM who works closely with design teams. Can give design feedback but not a hands-on designer.",
+    "skills": ["Product Strategy", "User Research", "Wireframing", "Figma (basic)"],
+    "looking_for": ["Co-founder", "Advice"],
+    "can_help_with": ["Product feedback", "Design"],
+    "domains": ["Consumer", "Enterprise SaaS"],
+    "linkedin_url": "https://linkedin.com/in/taylorkim",
+    "_design_match_target": "~58%"
+  },
+  {
+    "name": "Sam Martinez",
+    "role": "Frontend Engineer",
+    "company": "Vercel",
+    "bio": "Frontend dev with an eye for design. Can implement designs well and give basic UI feedback.",
+    "skills": ["React", "CSS", "Tailwind", "Basic UI sense"],
+    "looking_for": ["Collaborators", "Co-founder"],
+    "can_help_with": ["Technical advice", "Design"],
+    "domains": ["Developer Tools", "AI/ML"],
+    "linkedin_url": "https://linkedin.com/in/sammartinez",
+    "_design_match_target": "~52%"
+  },
+  {
+    "name": "Robin Chen",
+    "role": "Data Scientist",
+    "company": "Databricks",
+    "bio": "Data viz enthusiast. Can create charts and dashboards but not a product designer.",
+    "skills": ["Python", "Data Visualization", "D3.js", "Tableau"],
+    "looking_for": ["Collaborators", "Mentorship"],
+    "can_help_with": ["Technical advice", "Design"],
+    "domains": ["AI/ML", "Enterprise SaaS"],
+    "linkedin_url": "https://linkedin.com/in/robinchen",
+    "_design_match_target": "~50%"
+  }
+]
