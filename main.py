@@ -219,13 +219,50 @@ def generate_hybrid(messages, tools, confidence_threshold=0.99):
     queries are routed directly to cloud, avoiding the double-latency penalty
     of running local inference that is likely to fail anyway.
     """
-    FAIL_FAST_COMPLEXITY = 0.4277
-    CONFIDENCE_BASE = 0.6639
-    CONFIDENCE_SCALE = 0.3126
-    INTENT_WEIGHT = 0.2682
-    ARG_DIFFICULTY_WEIGHT = 0.1325
-    TOOL_PRESSURE_WEIGHT = 0.2872
-    TOOL_RELIABILITY_WEIGHT = 0.4380
+    # Offline-trained SVM parameters (balanced class_weight + 4 extra positives).
+    MEAN = [0.08695652173913043, 2.3043478260869565, 0.4739130434782608, 2.260869565217391, 0.34782608695652173, 0.9130434782608695]
+    SCALE = [0.18951734537133363, 1.158514138649933, 0.22109881974071516, 2.1713027807276126, 0.47628048478710105, 0.2817713347133852]
+    SV = [
+        [-0.4588314677411235, -1.1258799375612023, 1.4748471154398053, 0.34040873587189124, 1.369306393762915, 0.308606699924184],
+        [-0.4588314677411235, -1.1258799375612023, 1.4748471154398053, -0.12014425971949091, 1.369306393762915, 0.308606699924184],
+        [-0.4588314677411235, -1.1258799375612023, 0.5702742179700581, 1.7220677226460377, 1.369306393762915, 0.308606699924184],
+        [-0.4588314677411235, 0.6004693000326412, -0.33429867949968867, -0.5806972553108731, -0.7302967433402213, 0.308606699924184],
+        [-0.4588314677411235, 1.463643918829563, 1.4748471154398053, 0.8009617314632734, -0.7302967433402213, -3.2403703492039297],
+        [-0.4588314677411235, 0.6004693000326412, 1.4748471154398053, 0.34040873587189124, -0.7302967433402213, -3.2403703492039297],
+        [-0.4588314677411235, 1.463643918829563, 0.5702742179700581, 1.7220677226460377, -0.7302967433402213, 0.308606699924184],
+        [-0.4588314677411235, 1.463643918829563, 1.0225606667049314, 1.2615147270546556, -0.7302967433402213, 0.308606699924184],
+        [2.179449471770337, -0.26270531876428055, 0.11798776923518471, -0.12014425971949091, -0.7302967433402213, 0.308606699924184],
+        [-0.4588314677411235, -1.1258799375612023, -1.2388715769694356, -1.0412502509022552, 1.369306393762915, 0.308606699924184],
+        [-0.4588314677411235, -1.1258799375612023, -1.2388715769694356, -1.0412502509022552, 1.369306393762915, 0.308606699924184],
+        [-0.4588314677411235, 0.6004693000326412, -0.33429867949968867, -0.5806972553108731, -0.7302967433402213, 0.308606699924184],
+        [-0.4588314677411235, 1.463643918829563, -1.2388715769694356, -1.0412502509022552, -0.7302967433402213, 0.308606699924184],
+        [-0.4588314677411235, -1.1258799375612023, -0.33429867949968867, -0.5806972553108731, 1.369306393762915, 0.308606699924184],
+        [-0.4588314677411235, 0.6004693000326412, -0.33429867949968867, -1.0412502509022552, -0.7302967433402213, 0.308606699924184],
+    ]
+    DUAL_COEF = [[-0.018830803763000666, -0.8846153846153846, -0.49125934086967427, -0.8846153846153846, -0.18455697756276257, -0.3332584673601857, -0.16909775723866555, -0.5605699994469142, -0.8207074003547666, 0.0007820782857653614, 0.5394615840054955, 1.15, 0.7559134964678993, 1.15, 0.7513543570675789]]
+    INTERCEPT = [-0.482540305745601]
+    GAMMA = 0.1666666666666667
+
+    SVM_DECISION_THRESHOLD = -0.3
+
+    CATEGORY_CONFIDENCE_THRESHOLD = {
+        0: 0.45,
+        1: 0.72,
+        2: 0.90,
+        3: 0.90,
+        4: 0.88,
+        5: 0.90,
+        6: 0.88,
+        7: 0.85,
+    }
+
+    CATEGORY_MAP = [
+        ("weather", 0), ("forecast", 0), ("location", 0),
+        ("play", 1),
+        ("alarm", 2), ("timer", 3), ("reminder", 4),
+        ("message", 5), ("contact", 5),
+        ("search", 6), ("note", 6),
+    ]
 
     def get_last_user_text(msgs):
         for message in reversed(msgs):
@@ -233,106 +270,90 @@ def generate_hybrid(messages, tools, confidence_threshold=0.99):
                 return message.get("content", "")
         return ""
 
-    def compute_intent_score(last_user_text):
+    def extract_features(msgs, available_tools):
+        last_user_text = get_last_user_text(msgs)
+
         segments = re.split(r"\band\b|\bthen\b|\balso\b|\bafter\b|[,;]", last_user_text.lower())
         segments = [s.strip() for s in segments if len(s.strip()) >= 3]
-        segment_count = len(segments)
-        return max(0.0, min((segment_count - 1) / 2.0, 1.0))
+        intent_score = max(0.0, min((len(segments) - 1) / 2.0, 1.0))
 
-    def arg_difficulty_for_required_args(available_tools):
+        tool_count = len(available_tools)
+
         difficulties = []
         for tool in available_tools:
-            params = tool.get("parameters", {})
-            properties = params.get("properties", {})
-            for arg_name in params.get("required", []):
-                arg_type = str(properties.get(arg_name, {}).get("type", "")).lower()
-                arg_key = str(arg_name).lower()
-                combined = f"{arg_key} {arg_type}"
-
-                if any(token in combined for token in ("time", "duration", "hour", "minute", "when")):
+            for arg in tool.get("parameters", {}).get("required", []):
+                key = arg.lower()
+                if any(t in key for t in ("time", "duration", "hour", "minute", "when")):
                     difficulties.append(0.8)
-                elif any(token in combined for token in ("location", "city", "place")):
+                elif any(t in key for t in ("location", "city", "place")):
                     difficulties.append(0.2)
-                elif any(token in combined for token in ("contact", "person", "name", "recipient", "to")):
+                elif any(t in key for t in ("contact", "person", "name", "recipient")):
                     difficulties.append(0.7)
-                elif any(token in combined for token in ("query", "search", "term", "keyword")):
+                elif any(t in key for t in ("query", "search", "term", "keyword")):
                     difficulties.append(0.6)
                 else:
                     difficulties.append(0.4)
+        arg_difficulty = sum(difficulties) / len(difficulties) if difficulties else 0.3
 
-        if not difficulties:
-            return 0.3
-        return sum(difficulties) / len(difficulties)
-
-    def compute_tool_pressure(available_tools):
-        return max(0.0, min((len(available_tools) - 1) / 4.0, 1.0))
-
-    def compute_tool_reliability_penalty(available_tools):
-        """
-        Score how unreliable FunctionGemma tends to be for the given tool set.
-        Based on empirical observation: weather/location tools succeed;
-        alarm/timer/message/search/reminder/music tools fail at high confidence.
-        Returns 0.0 (reliable) to 1.0 (unreliable).
-        """
-        UNRELIABLE_PATTERNS = ("alarm", "timer", "message", "search", "reminder", "music", "contact", "note")
-        RELIABLE_PATTERNS = ("weather", "location", "forecast")
-
-        scores = []
+        categories = []
         for tool in available_tools:
-            name = tool.get("name", "").lower()
-            desc = tool.get("description", "").lower()
-            combined = f"{name} {desc}"
+            combined = f"{tool.get('name', '').lower()} {tool.get('description', '').lower()}"
+            matched = None
+            for pattern, cat in CATEGORY_MAP:
+                if pattern in combined:
+                    matched = cat
+                    break
+            if matched is not None:
+                categories.append(matched)
+        category = max(categories) if categories else 7
 
-            if any(p in combined for p in RELIABLE_PATTERNS):
-                scores.append(0.1)
-            elif any(p in combined for p in UNRELIABLE_PATTERNS):
-                scores.append(0.9)
-            else:
-                scores.append(0.5)  # unknown tool — be moderately cautious
+        single_tool = int(len(available_tools) == 1)
 
-        if not scores:
-            return 0.5
-        return sum(scores) / len(scores)
+        has_proper_noun = bool(re.search(r"\b[A-Z][a-z]+\b", last_user_text))
+        has_numeric = bool(re.search(r"\b\d+(?:[:.]\d+)?\b", last_user_text))
+        has_quoted = bool(re.search(r"['\"][^'\"]+['\"]", last_user_text))
+        explicit_value = int(has_proper_noun or has_numeric or has_quoted)
 
-    def is_tool_name_valid(result, available_tools):
-        calls = result.get("function_calls", [])
-        if not calls:
-            return True
-        tool_names = {tool["name"] for tool in available_tools}
-        return all(call.get("name") in tool_names for call in calls)
+        return [intent_score, float(tool_count), arg_difficulty, float(category), float(single_tool), float(explicit_value)]
 
-    last_user_text = get_last_user_text(messages)
-    intent_score = compute_intent_score(last_user_text)
-    arg_difficulty = arg_difficulty_for_required_args(tools)
-    tool_pressure = compute_tool_pressure(tools)
-    reliability_penalty = compute_tool_reliability_penalty(tools)
+    def svm_predict(features):
+        x = []
+        for i, value in enumerate(features):
+            denom = SCALE[i] if SCALE[i] != 0 else 1.0
+            x.append((value - MEAN[i]) / denom)
 
-    complexity = (
-        (intent_score * INTENT_WEIGHT)
-        + (arg_difficulty * ARG_DIFFICULTY_WEIGHT)
-        + (tool_pressure * TOOL_PRESSURE_WEIGHT)
-        + (reliability_penalty * TOOL_RELIABILITY_WEIGHT)
-    )
-    complexity = max(0.0, min(complexity, 1.0))
+        decision = INTERCEPT[0]
+        for coef, sv in zip(DUAL_COEF[0], SV):
+            sq = 0.0
+            for xi, svi in zip(x, sv):
+                diff = svi - xi
+                sq += diff * diff
+            kernel = pow(2.718281828459045, -GAMMA * sq)
+            decision += coef * kernel
+        return decision
 
-    if complexity >= FAIL_FAST_COMPLEXITY:
+    features = extract_features(messages, tools)
+    task_category = int(features[3])
+
+    decision_score = svm_predict(features)
+    if decision_score <= SVM_DECISION_THRESHOLD:
         cloud = generate_cloud(messages, tools)
-        cloud["source"] = "cloud (complexity skip)"
+        cloud["source"] = "cloud (svm skip)"
         cloud["local_confidence"] = None
         return cloud
 
     local = generate_cactus(messages, tools)
 
-    if not is_tool_name_valid(local, tools):
+    tool_names = {t["name"] for t in tools}
+    if any(c.get("name") not in tool_names for c in local.get("function_calls", [])):
         cloud = generate_cloud(messages, tools)
         cloud["source"] = "cloud (invalid local)"
         cloud["local_confidence"] = local["confidence"]
         cloud["total_time_ms"] += local["total_time_ms"]
         return cloud
 
-    effective_threshold = CONFIDENCE_BASE + (complexity * CONFIDENCE_SCALE)
-    effective_threshold = min(effective_threshold, 0.95)
-    if local["confidence"] >= effective_threshold:
+    threshold = CATEGORY_CONFIDENCE_THRESHOLD.get(task_category, 0.85)
+    if local["confidence"] >= threshold:
         local["source"] = "on-device"
         return local
 
