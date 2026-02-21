@@ -147,420 +147,349 @@ def generate_hybrid(messages, tools, confidence_threshold=0.99):
     """
     Hybrid strategy:
       1) Run on-device first.
-      2) Validate local tool calls against schema + extracted intent.
-      3) Repair obvious misses with deterministic parsing before cloud fallback.
-      4) Use cloud only when local output still looks unreliable.
+      2) Score local calls with generic schema + grounding checks (tool-agnostic).
+      3) Accept strong local calls; otherwise fallback to cloud.
     """
     user_text = " ".join(
         m.get("content", "") for m in messages if m.get("role") == "user"
     )
     user_text_l = user_text.lower()
+    user_tokens = set(re.findall(r"[a-z0-9]+", user_text_l))
     tool_map = {t["name"]: t for t in tools}
-    available = set(tool_map.keys())
 
-    def _normalize_text(s):
-        return " ".join(str(s).strip().lower().split())
+    def _coerce_value(value, schema):
+        if not isinstance(schema, dict):
+            return value
+        type_name = str(schema.get("type", "")).lower()
 
-    def _strip_outer_quotes(s):
-        s = s.strip()
-        if len(s) >= 2 and s[0] == s[-1] and s[0] in {"'", '"'}:
-            return s[1:-1].strip()
-        return s
+        if type_name == "integer":
+            if isinstance(value, bool):
+                return value
+            if isinstance(value, int):
+                return value
+            if isinstance(value, float) and value.is_integer():
+                return int(value)
+            if isinstance(value, str) and re.fullmatch(r"[+-]?\d+", value.strip()):
+                return int(value.strip())
+            return value
 
-    def _clean_capture(s):
-        s = re.sub(r"\s+", " ", str(s)).strip()
-        s = s.rstrip(".,!?")
-        s = _strip_outer_quotes(s)
-        return s.strip()
+        if type_name == "number":
+            if isinstance(value, bool):
+                return value
+            if isinstance(value, (int, float)):
+                return value
+            if isinstance(value, str):
+                try:
+                    return float(value.strip())
+                except ValueError:
+                    return value
+            return value
 
-    def _format_time_12h(hour, minute, meridiem):
-        return f"{hour}:{minute:02d} {meridiem.upper()}"
+        if type_name == "boolean":
+            if isinstance(value, bool):
+                return value
+            if isinstance(value, str):
+                v = value.strip().lower()
+                if v in {"true", "yes", "1", "on"}:
+                    return True
+                if v in {"false", "no", "0", "off"}:
+                    return False
+            return value
 
-    def _parse_alarm_time_groups(hour_s, minute_s, mer_s):
-        hour = int(hour_s)
-        minute = int(minute_s or 0)
-        mer = mer_s.lower()
-        hour_24 = hour
-        if mer == "pm" and hour_24 != 12:
-            hour_24 += 12
-        if mer == "am" and hour_24 == 12:
-            hour_24 = 0
-        return {"hour": hour_24, "minute": minute}
+        if type_name == "string":
+            if isinstance(value, str):
+                return value.strip()
+            return str(value)
 
-    def _extract_intents(text_l, available_tools):
-        intent_patterns = {
-            "get_weather": [r"\bweather\b", r"\bforecast\b", r"\btemperature\b"],
-            "set_alarm": [r"\balarm\b", r"\bwake me up\b"],
-            "send_message": [r"\bsend\b", r"\btext\b", r"\bmessage\b"],
-            "create_reminder": [r"\bremind\b", r"\breminder\b"],
-            "search_contacts": [r"\bcontacts\b", r"\blook up\b", r"\bsearch for\b"],
-            "play_music": [r"\bplay\b", r"\bmusic\b", r"\bsong\b", r"\bplaylist\b"],
-            "set_timer": [r"\btimer\b", r"\bcountdown\b"],
-        }
+        if type_name == "array" and isinstance(value, list):
+            item_schema = schema.get("items", {})
+            return [_coerce_value(v, item_schema) for v in value]
 
-        intents = set()
-        for tool_name, patterns in intent_patterns.items():
-            if tool_name not in available_tools:
-                continue
-            if any(re.search(p, text_l) for p in patterns):
-                intents.add(tool_name)
-        return intents
+        return value
 
-    def _coerce_call_types(call):
+    def _value_matches_type(value, schema):
+        if not isinstance(schema, dict):
+            return True
+        type_name = str(schema.get("type", "")).lower()
+        if not type_name:
+            return True
+        if type_name == "integer":
+            return isinstance(value, int) and not isinstance(value, bool)
+        if type_name == "number":
+            return isinstance(value, (int, float)) and not isinstance(value, bool)
+        if type_name == "boolean":
+            return isinstance(value, bool)
+        if type_name == "string":
+            return isinstance(value, str)
+        if type_name == "array":
+            if not isinstance(value, list):
+                return False
+            item_schema = schema.get("items", {})
+            return all(_value_matches_type(v, item_schema) for v in value)
+        if type_name == "object":
+            return isinstance(value, dict)
+        return True
+
+    def _tokenize_tool(tool):
+        parts = [
+            tool.get("name", ""),
+            tool.get("description", ""),
+        ]
+        params = tool.get("parameters", {}).get("properties", {})
+        for p_name, p_schema in params.items():
+            parts.append(str(p_name))
+            if isinstance(p_schema, dict):
+                parts.append(str(p_schema.get("description", "")))
+        raw = " ".join(parts).replace("_", " ").lower()
+        tokens = {t for t in re.findall(r"[a-z0-9]+", raw) if len(t) > 2}
+        return tokens
+
+    tool_tokens = {name: _tokenize_tool(tool) for name, tool in tool_map.items()}
+
+    def _tool_relevance(name):
+        tokens = tool_tokens.get(name, set())
+        if not tokens:
+            return 0.0
+        overlap = len(tokens & user_tokens)
+        return overlap / max(1, len(tokens))
+
+    def _coerce_call(call):
         name = call.get("name")
         args = call.get("arguments", {})
         if not isinstance(args, dict):
             args = {}
         out = {"name": name, "arguments": dict(args)}
-        if name not in tool_map:
+        tool = tool_map.get(name)
+        if not tool:
             return out
-
-        props = tool_map[name].get("parameters", {}).get("properties", {})
-        for key, val in list(out["arguments"].items()):
-            ptype = props.get(key, {}).get("type", "").lower()
-            if ptype == "integer":
-                if isinstance(val, str) and re.fullmatch(r"[+-]?\d+", val.strip()):
-                    out["arguments"][key] = int(val.strip())
-                elif isinstance(val, float) and val.is_integer():
-                    out["arguments"][key] = int(val)
-            elif ptype == "string":
-                if isinstance(val, str):
-                    out["arguments"][key] = val.strip()
-                else:
-                    out["arguments"][key] = str(val)
+        props = tool.get("parameters", {}).get("properties", {})
+        for key, value in list(out["arguments"].items()):
+            if key in props:
+                out["arguments"][key] = _coerce_value(value, props[key])
         return out
 
-    def _schema_valid(call):
+    def _schema_stats(call):
         name = call.get("name")
         args = call.get("arguments", {})
         if name not in tool_map or not isinstance(args, dict):
-            return False
-        required = tool_map[name].get("parameters", {}).get("required", [])
-        props = tool_map[name].get("parameters", {}).get("properties", {})
-        for key in required:
-            if key not in args:
-                return False
-        for key, val in args.items():
+            return {
+                "valid": False,
+                "required_coverage": 0.0,
+                "type_pass": 0.0,
+                "unknown_arg_ratio": 1.0,
+            }
+
+        tool = tool_map[name]
+        params = tool.get("parameters", {})
+        required = params.get("required", []) or []
+        props = params.get("properties", {}) or {}
+
+        required_present = sum(1 for key in required if key in args)
+        required_coverage = required_present / max(1, len(required))
+
+        checked = 0
+        passed = 0
+        unknown = 0
+        for key, value in args.items():
             if key not in props:
+                unknown += 1
                 continue
-            ptype = props[key].get("type", "").lower()
-            if ptype == "integer" and not isinstance(val, int):
-                return False
-            if ptype == "string" and not isinstance(val, str):
-                return False
-        return True
+            checked += 1
+            if _value_matches_type(value, props[key]):
+                passed += 1
+        type_pass = passed / max(1, checked)
+        unknown_ratio = unknown / max(1, len(args))
 
-    def _call_matches(predicted, expected):
-        if predicted.get("name") != expected.get("name"):
-            return False
-        pred_args = predicted.get("arguments", {})
-        exp_args = expected.get("arguments", {})
-        for key, exp_val in exp_args.items():
-            if key not in pred_args:
-                return False
-            pred_val = pred_args[key]
-            if isinstance(exp_val, str):
-                if _normalize_text(pred_val) != _normalize_text(exp_val):
-                    return False
-            else:
-                if pred_val != exp_val:
-                    return False
-        return True
+        valid = required_coverage >= 1.0 and type_pass >= 1.0 and unknown_ratio <= 0.4
+        return {
+            "valid": valid,
+            "required_coverage": required_coverage,
+            "type_pass": type_pass,
+            "unknown_arg_ratio": unknown_ratio,
+        }
 
-    def _calls_match(predicted_calls, expected_calls):
-        if len(predicted_calls) != len(expected_calls):
-            return False
-        used = set()
-        for exp in expected_calls:
-            matched = False
-            for i, pred in enumerate(predicted_calls):
-                if i in used:
+    def _argument_grounding_score(call):
+        args = call.get("arguments", {})
+        if not isinstance(args, dict) or not args:
+            return 0.0
+        hit = 0.0
+        total = 0
+        for value in args.values():
+            if isinstance(value, str):
+                total += 1
+                val = value.strip().lower()
+                if not val:
                     continue
-                if _call_matches(pred, exp):
-                    used.add(i)
-                    matched = True
-                    break
-            if not matched:
-                return False
-        return True
+                if val in user_text_l:
+                    hit += 1.0
+                    continue
+                val_tokens = set(re.findall(r"[a-z0-9]+", val))
+                if not val_tokens:
+                    continue
+                overlap = len(val_tokens & user_tokens) / len(val_tokens)
+                hit += overlap
+            elif isinstance(value, (int, float)) and not isinstance(value, bool):
+                total += 1
+                if str(value) in user_text_l:
+                    hit += 1.0
+        return hit / max(1, total)
 
-    def _extract_rule_calls(text):
-        clauses = [
-            c.strip()
-            for c in re.split(r"\s*,\s*(?:and\s+)?|\s+\band\b\s+", text, flags=re.I)
-            if c and c.strip()
+    def _estimate_action_count(text):
+        if not text.strip():
+            return 1
+        separators = re.findall(r"\b(?:and|then|also)\b|,", text.lower())
+        return max(1, min(4, len(separators) + 1))
+
+    def _dedupe_calls(calls):
+        out = []
+        seen = set()
+        for call in calls:
+            key = json.dumps(
+                {"name": call.get("name"), "arguments": call.get("arguments", {})},
+                sort_keys=True,
+            )
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append(call)
+        return out
+
+    action_count_hint = _estimate_action_count(user_text)
+
+    def _score_candidate(calls, conf):
+        call_scores = []
+        for call in calls:
+            stats = _schema_stats(call)
+            relevance = _tool_relevance(call.get("name"))
+            grounding = _argument_grounding_score(call)
+            score = (
+                0.45 * stats["required_coverage"]
+                + 0.30 * stats["type_pass"]
+                + 0.15 * grounding
+                + 0.10 * relevance
+                - 0.20 * stats["unknown_arg_ratio"]
+            )
+            call_scores.append(
+                {
+                    "call": call,
+                    "stats": stats,
+                    "score": max(0.0, min(1.0, score)),
+                }
+            )
+
+        strong_calls = [
+            c for c in call_scores if c["stats"]["valid"] and c["score"] >= 0.55
         ]
-        calls = []
-        last_contact = None
+        strong_calls = sorted(strong_calls, key=lambda x: x["score"], reverse=True)
+        strong_calls = strong_calls[: action_count_hint + 1]
+        selected_calls = [c["call"] for c in strong_calls]
 
-        for raw_clause in clauses:
-            clause = raw_clause.strip().strip(".!? ")
-            if not clause:
-                continue
-
-            if "search_contacts" in available:
-                m = re.search(
-                    r"(?:find|look up|search for)\s+([A-Za-z][A-Za-z\s\-']+?)\s+(?:in|from)\s+my\s+contacts\b",
-                    clause,
-                    re.I,
-                )
-                if m:
-                    query = _clean_capture(m.group(1))
-                    if query:
-                        calls.append(
-                            {"name": "search_contacts", "arguments": {"query": query}}
-                        )
-                        last_contact = query
-                        continue
-
-            if "send_message" in available:
-                m = re.search(
-                    r"(?:send|text)\s+(?:a\s+message\s+to\s+)?((?!him\b|her\b|them\b)[A-Za-z][A-Za-z\s\-']*?)\s+saying\s+(.+)$",
-                    clause,
-                    re.I,
-                )
-                if m:
-                    recipient = _clean_capture(m.group(1))
-                    message = _clean_capture(m.group(2))
-                    if recipient and message:
-                        calls.append(
-                            {
-                                "name": "send_message",
-                                "arguments": {
-                                    "recipient": recipient,
-                                    "message": message,
-                                },
-                            }
-                        )
-                        last_contact = recipient
-                        continue
-
-                m = re.search(
-                    r"(?:send|text)\s+(?:him|her|them)\s+(?:a\s+)?message\s+saying\s+(.+)$",
-                    clause,
-                    re.I,
-                )
-                if m and last_contact:
-                    message = _clean_capture(m.group(1))
-                    if message:
-                        calls.append(
-                            {
-                                "name": "send_message",
-                                "arguments": {
-                                    "recipient": last_contact,
-                                    "message": message,
-                                },
-                            }
-                        )
-                        continue
-
-            if "get_weather" in available:
-                m = re.search(
-                    r"weather(?:\s+like)?\s+in\s+([A-Za-z][A-Za-z\s\-']+)$",
-                    clause,
-                    re.I,
-                )
-                if m:
-                    location = _clean_capture(m.group(1))
-                    if location:
-                        calls.append(
-                            {"name": "get_weather", "arguments": {"location": location}}
-                        )
-                        continue
-
-            if "set_alarm" in available:
-                m = re.search(
-                    r"(?:set\s+an?\s+alarm|wake me up)\s+(?:for|at)\s*(\d{1,2})(?::(\d{2}))?\s*(am|pm)\b",
-                    clause,
-                    re.I,
-                )
-                if m:
-                    alarm = _parse_alarm_time_groups(m.group(1), m.group(2), m.group(3))
-                    calls.append({"name": "set_alarm", "arguments": alarm})
-                    continue
-
-            if "set_timer" in available:
-                m = re.search(
-                    r"set\s+(?:a\s+)?timer\s+for\s+(\d+)\s*(?:minutes?|mins?)\b",
-                    clause,
-                    re.I,
-                )
-                if not m:
-                    m = re.search(
-                        r"set\s+a\s+(\d+)\s*(?:minute|min)\s+timer\b",
-                        clause,
-                        re.I,
-                    )
-                if m:
-                    minutes = int(m.group(1))
-                    if minutes > 0:
-                        calls.append(
-                            {"name": "set_timer", "arguments": {"minutes": minutes}}
-                        )
-                        continue
-
-            if "create_reminder" in available:
-                m = re.search(
-                    r"remind me(?:\s+to|\s+about)?\s+(.+?)\s+at\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)\b",
-                    clause,
-                    re.I,
-                )
-                if m:
-                    title = _clean_capture(m.group(1))
-                    title = re.sub(r"^(?:the|a|an)\s+", "", title, flags=re.I).strip()
-                    time_s = _format_time_12h(
-                        int(m.group(2)), int(m.group(3) or 0), m.group(4)
-                    )
-                    if title:
-                        calls.append(
-                            {
-                                "name": "create_reminder",
-                                "arguments": {"title": title, "time": time_s},
-                            }
-                        )
-                        continue
-
-            if "play_music" in available:
-                m = re.search(r"\bplay\s+(.+)$", clause, re.I)
-                if m:
-                    song = _clean_capture(m.group(1))
-                    had_some_prefix = song.lower().startswith("some ")
-                    if had_some_prefix:
-                        song = song[5:].strip()
-                    if had_some_prefix and song.lower().endswith(" music"):
-                        song = song[:-6].strip()
-                    if song:
-                        calls.append(
-                            {"name": "play_music", "arguments": {"song": song}}
-                        )
-
-        return calls
-
-    def _semantic_valid(calls, intents, expected_calls):
-        if not calls:
-            return False
-
-        call_set = {c.get("name") for c in calls}
-        if any(name not in available for name in call_set):
-            return False
-        if intents and not intents.issubset(call_set):
-            return False
-        if expected_calls and not _calls_match(calls, expected_calls):
-            return False
-
-        for c in calls:
-            name = c.get("name")
-            args = c.get("arguments", {})
-            if name == "set_alarm":
-                if not (
-                    isinstance(args.get("hour"), int)
-                    and isinstance(args.get("minute"), int)
-                    and 0 <= args["hour"] <= 23
-                    and 0 <= args["minute"] <= 59
-                ):
-                    return False
-            elif name == "set_timer":
-                if not (isinstance(args.get("minutes"), int) and args["minutes"] > 0):
-                    return False
-            elif name == "get_weather":
-                if not (
-                    isinstance(args.get("location"), str) and args["location"].strip()
-                ):
-                    return False
-            elif name == "search_contacts":
-                if not (isinstance(args.get("query"), str) and args["query"].strip()):
-                    return False
-            elif name == "send_message":
-                if not (
-                    isinstance(args.get("recipient"), str)
-                    and args["recipient"].strip()
-                    and isinstance(args.get("message"), str)
-                    and args["message"].strip()
-                ):
-                    return False
-            elif name == "create_reminder":
-                if not (
-                    isinstance(args.get("title"), str)
-                    and args["title"].strip()
-                    and isinstance(args.get("time"), str)
-                    and args["time"].strip()
-                ):
-                    return False
-            elif name == "play_music":
-                if not (isinstance(args.get("song"), str) and args["song"].strip()):
-                    return False
-
-        return True
-
-    intents = _extract_intents(user_text_l, available)
-    expected_from_text = [_coerce_call_types(c) for c in _extract_rule_calls(user_text)]
-    expected_valid = bool(expected_from_text) and all(
-        _schema_valid(c) for c in expected_from_text
-    )
-    expected_covers_intents = (not intents) or intents.issubset(
-        {c["name"] for c in expected_from_text}
-    )
+        all_schema_valid = bool(calls) and all(c["stats"]["valid"] for c in call_scores)
+        mean_quality = (
+            sum(c["score"] for c in call_scores) / len(call_scores)
+            if call_scores
+            else 0.0
+        )
+        action_ratio = min(1.0, len(calls) / max(1, action_count_hint))
+        reliability = 0.50 * mean_quality + 0.30 * conf + 0.20 * action_ratio
+        return {
+            "strong_calls": strong_calls,
+            "selected_calls": selected_calls,
+            "all_schema_valid": all_schema_valid,
+            "mean_quality": mean_quality,
+            "reliability": reliability,
+        }
 
     local = generate_cactus(messages, tools)
-    local_calls = [_coerce_call_types(c) for c in local.get("function_calls", [])]
+    local_calls_raw = [_coerce_call(c) for c in local.get("function_calls", [])]
+    local_calls = [c for c in local_calls_raw if c.get("name") in tool_map]
+    local_calls = _dedupe_calls(local_calls)
     local["function_calls"] = local_calls
     local_conf = float(local.get("confidence", 0.0) or 0.0)
+    local_eval = _score_candidate(local_calls, local_conf)
 
-    schema_ok = bool(local_calls) and all(_schema_valid(c) for c in local_calls)
-    semantic_ok = schema_ok and _semantic_valid(
-        local_calls, intents, expected_from_text
+    if (not local_eval["all_schema_valid"]) or local_eval["mean_quality"] < 0.58:
+        refine_messages = list(messages) + [
+            {
+                "role": "user",
+                "content": (
+                    "Use only the provided tools. Return calls only for explicit intents in this request. "
+                    "Every returned call must include all required arguments with correctly typed values."
+                ),
+            }
+        ]
+        local_refine = generate_cactus(refine_messages, tools)
+        refine_calls_raw = [
+            _coerce_call(c) for c in local_refine.get("function_calls", [])
+        ]
+        refine_calls = [c for c in refine_calls_raw if c.get("name") in tool_map]
+        refine_calls = _dedupe_calls(refine_calls)
+        refine_conf = float(local_refine.get("confidence", 0.0) or 0.0)
+        refine_eval = _score_candidate(refine_calls, refine_conf)
+
+        if refine_eval["reliability"] > local_eval["reliability"]:
+            local = local_refine
+            local_calls = refine_calls
+            local_conf = refine_conf
+            local["function_calls"] = local_calls
+            local_eval = refine_eval
+
+    selected_local_calls = local_eval["selected_calls"]
+    all_schema_valid = local_eval["all_schema_valid"]
+    mean_quality = local_eval["mean_quality"]
+    reliability = local_eval["reliability"]
+
+    # Keep baseline strict enough for held-out quality, but allow high-quality local calls.
+    dyn_thr = min(confidence_threshold, 0.72 + 0.05 * max(0, action_count_hint - 1))
+    should_accept_local = (
+        bool(local_calls)
+        and all_schema_valid
+        and (local_conf >= dyn_thr or (reliability >= 0.70 and local_conf >= 0.45))
     )
 
-    # Dynamic threshold: lower than before to favor on-device when calls are semantically valid.
-    base_thr = confidence_threshold
-    if len(intents) <= 1:
-        dyn_thr = min(base_thr, 0.55)
-    elif len(intents) == 2:
-        dyn_thr = min(base_thr, 0.62)
-    else:
-        dyn_thr = min(base_thr, 0.70)
-
-    should_accept_local = semantic_ok and (local_conf >= dyn_thr)
     if should_accept_local:
         local["source"] = "on-device"
         return local
 
-    # Deterministic repair path for structured task prompts.
-    if expected_valid and expected_covers_intents:
-        return {
-            "function_calls": expected_from_text,
-            "total_time_ms": local.get("total_time_ms", 0),
-            "confidence": max(local_conf, dyn_thr),
-            "source": "on-device",
-            "repair_used": True,
-            "fallback_reason": {
-                "schema_ok": schema_ok,
-                "semantic_ok": semantic_ok,
-                "local_confidence": local_conf,
-                "dynamic_threshold": dyn_thr,
-            },
-        }
+    # If raw local output is noisy but we still have high-confidence valid calls, keep only strong calls.
+    if selected_local_calls:
+        selected_stats = [_schema_stats(c) for c in selected_local_calls]
+        if all(s["valid"] for s in selected_stats):
+            selected_quality = sum(
+                c["score"] for c in local_eval["strong_calls"]
+            ) / len(local_eval["strong_calls"])
+            if selected_quality >= 0.72 and local_conf >= 0.40:
+                return {
+                    "function_calls": selected_local_calls,
+                    "total_time_ms": local.get("total_time_ms", 0),
+                    "confidence": local_conf,
+                    "source": "on-device",
+                    "repair_used": True,
+                    "fallback_reason": {
+                        "all_schema_valid": all_schema_valid,
+                        "mean_quality": mean_quality,
+                        "local_confidence": local_conf,
+                        "dynamic_threshold": dyn_thr,
+                    },
+                }
 
     try:
         cloud = generate_cloud(messages, tools)
-        cloud["function_calls"] = [
-            _coerce_call_types(c) for c in cloud.get("function_calls", [])
-        ]
+        cloud_calls = [_coerce_call(c) for c in cloud.get("function_calls", [])]
+        cloud["function_calls"] = [c for c in cloud_calls if c.get("name") in tool_map]
         cloud["source"] = "cloud (fallback)"
         cloud["local_confidence"] = local_conf
         cloud["total_time_ms"] += local.get("total_time_ms", 0)
         cloud["fallback_reason"] = {
-            "schema_ok": schema_ok,
-            "semantic_ok": semantic_ok,
+            "all_schema_valid": all_schema_valid,
+            "mean_quality": mean_quality,
             "local_confidence": local_conf,
             "dynamic_threshold": dyn_thr,
         }
         return cloud
     except Exception as exc:
         # If cloud is unavailable, return best on-device result rather than failing hard.
-        safe_calls = (
-            expected_from_text if expected_valid else local_calls if schema_ok else []
-        )
+        safe_calls = selected_local_calls or local_calls
         return {
             "function_calls": safe_calls,
             "total_time_ms": local.get("total_time_ms", 0),
@@ -568,8 +497,8 @@ def generate_hybrid(messages, tools, confidence_threshold=0.99):
             "source": "on-device",
             "cloud_error": str(exc),
             "fallback_reason": {
-                "schema_ok": schema_ok,
-                "semantic_ok": semantic_ok,
+                "all_schema_valid": all_schema_valid,
+                "mean_quality": mean_quality,
                 "local_confidence": local_conf,
                 "dynamic_threshold": dyn_thr,
             },
