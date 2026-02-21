@@ -230,9 +230,23 @@ def generate_hybrid(messages, tools, confidence_threshold=0.99):
             return None
         return _norm_text(m.group(1)).strip(" .")
 
+    def _extract_user_times():
+        times = set()
+        for m in re.finditer(
+            r"\b(\d{1,2})(?::(\d{2}))?\s*([ap])\.?\s*m\.?\b",
+            user_text,
+            flags=re.IGNORECASE,
+        ):
+            h = int(m.group(1))
+            mm = int(m.group(2) or "0")
+            if 1 <= h <= 12 and 0 <= mm <= 59:
+                times.add(f"{h}:{mm:02d} {m.group(3).upper()}M")
+        return times
+
     user_reminder_title = _extract_user_reminder_title()
     user_saying_message = _extract_user_saying_message()
     user_recipient = _extract_user_recipient()
+    user_times = _extract_user_times()
 
     def _coerce_value(value, schema):
         if not isinstance(schema, dict):
@@ -404,6 +418,24 @@ def generate_hybrid(messages, tools, confidence_threshold=0.99):
             return 0.0
         return sum(1 for c in calls if _schema_valid(c)) / len(calls)
 
+    def _is_string_heavy(call):
+        name = call.get("name")
+        tool = tool_map.get(name, {})
+        params = tool.get("parameters", {}) or {}
+        required = params.get("required", []) or []
+        props = params.get("properties", {}) or {}
+        if not required:
+            return False
+        str_req = 0
+        num_req = 0
+        for k in required:
+            t = str((props.get(k) or {}).get("type", "")).lower()
+            if t == "string":
+                str_req += 1
+            elif t in {"integer", "number"}:
+                num_req += 1
+        return str_req >= 1 and str_req >= num_req
+
     user_text_l = user_text.lower()
     user_tokens = set(re.findall(r"[a-z0-9]+", user_text_l))
 
@@ -487,6 +519,10 @@ def generate_hybrid(messages, tools, confidence_threshold=0.99):
                         ok = False
                     elif not has_time_like and s.lower() not in user_text_l:
                         ok = False
+                    if user_times and has_time_like:
+                        canon = _canonical_time(s)
+                        if canon and canon not in user_times:
+                            ok = False
                 if "title" in key or "title" in desc:
                     if re.match(r"^remind me\b", s, flags=re.IGNORECASE):
                         ok = False
@@ -636,6 +672,21 @@ def generate_hybrid(messages, tools, confidence_threshold=0.99):
     selected_conf = float(selected.get("confidence", 0.0) or 0.0)
     selected_schema = _schema_rate(selected_calls)
     selected_quality = _call_quality(selected_calls)
+    string_heavy_single = (
+        action_hint == 1 and len(selected_calls) == 1 and _is_string_heavy(selected_calls[0])
+    )
+
+    reminder_time_ok = True
+    if user_times:
+        for c in selected_calls:
+            if c.get("name") != "create_reminder":
+                continue
+            t = c.get("arguments", {}).get("time")
+            if isinstance(t, str):
+                canon = _canonical_time(t)
+                if canon and canon not in user_times:
+                    reminder_time_ok = False
+                    break
 
     dyn_thr = min(confidence_threshold, 0.46 + 0.07 * max(0, action_hint - 1))
     call_count_ok = len(selected_calls) >= action_hint
@@ -643,11 +694,18 @@ def generate_hybrid(messages, tools, confidence_threshold=0.99):
     accept_local = (
         bool(selected_calls)
         and selected_schema >= 1.0
-        and selected_quality >= (0.62 + 0.04 * max(0, action_hint - 1))
+        and selected_quality >= (
+            0.62 + 0.04 * max(0, action_hint - 1) + (0.10 if string_heavy_single else 0.0)
+        )
         and call_count_ok
+        and reminder_time_ok
+        and ((not string_heavy_single) or consensus)
         and (
             (consensus and min(base_conf, verify_conf) >= (dyn_thr - 0.08))
-            or (selected_conf >= (dyn_thr + 0.12) and selected_quality >= 0.78)
+            or (
+                selected_conf >= (dyn_thr + (0.16 if string_heavy_single else 0.12))
+                and selected_quality >= (0.82 if string_heavy_single else 0.78)
+            )
         )
     )
 
@@ -694,15 +752,19 @@ def generate_hybrid(messages, tools, confidence_threshold=0.99):
             full = 1 if (cov >= 1.0 and sch >= 1.0) else 0
             return (full, cov, score)
 
-        best_calls = cloud_calls
-        best_rank = _rank(cloud_calls)
-        sel_rank = _rank(selected_calls)
-        merged_rank = _rank(merged_calls)
-        if sel_rank > best_rank:
-            best_calls = selected_calls
-            best_rank = sel_rank
-        if merged_rank > best_rank:
-            best_calls = merged_calls
+        if action_hint == 1:
+            # For single-intent fallback, trust cloud output to avoid local overfitting artifacts.
+            best_calls = cloud_calls
+        else:
+            best_calls = cloud_calls
+            best_rank = _rank(cloud_calls)
+            sel_rank = _rank(selected_calls)
+            merged_rank = _rank(merged_calls)
+            if sel_rank > best_rank:
+                best_calls = selected_calls
+                best_rank = sel_rank
+            if merged_rank > best_rank:
+                best_calls = merged_calls
 
         cloud["function_calls"] = best_calls
         cloud["source"] = "cloud (fallback)"
