@@ -213,3 +213,6 @@ server/
 
 # Leaderboard data
 docs/
+.DS_Store
+.vscode
+svm_gate.pkl

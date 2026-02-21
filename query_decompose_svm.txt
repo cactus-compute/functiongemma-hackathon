@@ -1,0 +1,76 @@
+[1/30] Running: weather_sf (easy)... F1=1.00 | 576ms | on-device
+[2/30] Running: alarm_10am (easy)... F1=0.00 | 398ms | cloud
+[3/30] Running: message_alice (easy)... F1=1.00 | 411ms | cloud
+[4/30] Running: weather_london (easy)... F1=1.00 | 336ms | on-device
+[5/30] Running: alarm_6am (easy)... F1=1.00 | 319ms | cloud
+[6/30] Running: play_bohemian (easy)... F1=1.00 | 338ms | on-device
+[7/30] Running: timer_5min (easy)... F1=1.00 | 404ms | cloud
+[8/30] Running: reminder_meeting (easy)... F1=1.00 | 453ms | cloud
+[9/30] Running: search_bob (easy)... F1=1.00 | 432ms | cloud
+[10/30] Running: weather_paris (easy)... F1=0.00 | 0ms | on-device
+[11/30] Running: message_among_three (medium)... F1=0.00 | 0ms | on-device
+[12/30] Running: weather_among_two (medium)... F1=0.00 | 0ms | on-device
+[13/30] Running: alarm_among_three (medium)... F1=0.00 | 496ms | on-device
+[14/30] Running: music_among_three (medium)... F1=0.00 | 648ms | on-device
+[15/30] Running: reminder_among_four (medium)... F1=0.00 | 1186ms | on-device
+[16/30] Running: timer_among_three (medium)... F1=1.00 | 403ms | on-device
+[17/30] Running: search_among_four (medium)... F1=0.00 | 938ms | on-device
+[18/30] Running: weather_among_four (medium)... F1=1.00 | 415ms | on-device
+[19/30] Running: message_among_four (medium)... F1=0.00 | 667ms | on-device
+[20/30] Running: alarm_among_five (medium)... F1=1.00 | 476ms | on-device
+[21/30] Running: message_and_weather (hard)... F1=0.67 | 1738ms | on-device
+[22/30] Running: alarm_and_weather (hard)... F1=0.67 | 1583ms | on-device
+[23/30] Running: timer_and_music (hard)... F1=0.50 | 892ms | hybrid
+[24/30] Running: reminder_and_message (hard)... F1=0.00 | 1729ms | on-device
+[25/30] Running: search_and_message (hard)... F1=0.00 | 1638ms | hybrid
+[26/30] Running: alarm_and_reminder (hard)... F1=0.50 | 2052ms | on-device
+[27/30] Running: weather_and_music (hard)... F1=1.00 | 874ms | hybrid
+[28/30] Running: message_weather_alarm (hard)... F1=0.40 | 2466ms | on-device
+[29/30] Running: timer_music_reminder (hard)... F1=0.33 | 2034ms | hybrid
+[30/30] Running: search_message_weather (hard)... F1=0.50 | 1542ms | hybrid
+
+=== Benchmark Results ===
+
+   # | Difficulty | Name                         |  Time (ms) |    F1 | Source
+  ---+------------+------------------------------+------------+-------+---------------------
+   1 | easy       | weather_sf                   |     575.79 |  1.00 | on-device
+   2 | easy       | alarm_10am                   |     398.23 |  0.00 | cloud
+   3 | easy       | message_alice                |     411.31 |  1.00 | cloud
+   4 | easy       | weather_london               |     336.22 |  1.00 | on-device
+   5 | easy       | alarm_6am                    |     318.96 |  1.00 | cloud
+   6 | easy       | play_bohemian                |     337.91 |  1.00 | on-device
+   7 | easy       | timer_5min                   |     404.46 |  1.00 | cloud
+   8 | easy       | reminder_meeting             |     452.72 |  1.00 | cloud
+   9 | easy       | search_bob                   |     431.96 |  1.00 | cloud
+  10 | easy       | weather_paris                |       0.02 |  0.00 | on-device
+  11 | medium     | message_among_three          |       0.01 |  0.00 | on-device
+  12 | medium     | weather_among_two            |       0.01 |  0.00 | on-device
+  13 | medium     | alarm_among_three            |     496.05 |  0.00 | on-device
+  14 | medium     | music_among_three            |     647.65 |  0.00 | on-device
+  15 | medium     | reminder_among_four          |    1186.36 |  0.00 | on-device
+  16 | medium     | timer_among_three            |     403.30 |  1.00 | on-device
+  17 | medium     | search_among_four            |     937.92 |  0.00 | on-device
+  18 | medium     | weather_among_four           |     414.91 |  1.00 | on-device
+  19 | medium     | message_among_four           |     666.88 |  0.00 | on-device
+  20 | medium     | alarm_among_five             |     476.30 |  1.00 | on-device
+  21 | hard       | message_and_weather          |    1737.83 |  0.67 | on-device
+  22 | hard       | alarm_and_weather            |    1583.42 |  0.67 | on-device
+  23 | hard       | timer_and_music              |     892.49 |  0.50 | hybrid
+  24 | hard       | reminder_and_message         |    1729.40 |  0.00 | on-device
+  25 | hard       | search_and_message           |    1638.23 |  0.00 | hybrid
+  26 | hard       | alarm_and_reminder           |    2052.04 |  0.50 | on-device
+  27 | hard       | weather_and_music            |     874.08 |  1.00 | hybrid
+  28 | hard       | message_weather_alarm        |    2465.74 |  0.40 | on-device
+  29 | hard       | timer_music_reminder         |    2034.48 |  0.33 | hybrid
+  30 | hard       | search_message_weather       |    1541.81 |  0.50 | hybrid
+
+--- Summary ---
+  easy     avg F1=0.80  avg time=366.76ms  on-device=4/10 cloud=6/10
+  medium   avg F1=0.30  avg time=522.94ms  on-device=10/10 cloud=0/10
+  hard     avg F1=0.46  avg time=1654.95ms  on-device=5/10 cloud=5/10
+  overall  avg F1=0.52  avg time=848.22ms  total time=25446.46ms
+           on-device=19/30 (63%)  cloud=11/30 (37%)
+
+==================================================
+  TOTAL SCORE: 45.2%
+==================================================

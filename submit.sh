@@ -1,0 +1,1 @@
+python submit.py --team "RibsAndRobs_minimax2.5" --location "London"
