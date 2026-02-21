@@ -157,6 +157,28 @@ def generate_hybrid(messages, tools, confidence_threshold=0.99):
     user_tokens = set(re.findall(r"[a-z0-9]+", user_text_l))
     tool_map = {t["name"]: t for t in tools}
 
+    def _estimate_action_count_early(text):
+        if not text.strip():
+            return 1
+        separators = re.findall(r"\b(?:and|then|also)\b|,", text.lower())
+        return max(1, min(4, len(separators) + 1))
+
+    early_action_count = _estimate_action_count_early(user_text)
+    if early_action_count >= 3 and len(tools) >= 3:
+        try:
+            cloud = generate_cloud(messages, tools)
+            cloud["function_calls"] = [
+                c for c in cloud.get("function_calls", [])
+                if c.get("name") in tool_map
+            ]
+            cloud["source"] = "cloud (fallback)"
+            cloud["local_confidence"] = 0.0
+            cloud["total_time_ms"] = cloud.get("total_time_ms", 0)
+            cloud["fallback_reason"] = {"early_route": "3+ intents detected"}
+            return cloud
+        except Exception:
+            pass
+
     def _coerce_value(value, schema):
         if not isinstance(schema, dict):
             return value
@@ -334,6 +356,52 @@ def generate_hybrid(messages, tools, confidence_threshold=0.99):
                     hit += 1.0
         return hit / max(1, total)
 
+    def _argument_quality_score(call):
+        """Schema-driven plausibility checks on argument values (tool-agnostic)."""
+        name = call.get("name")
+        args = call.get("arguments", {})
+        if name not in tool_map or not isinstance(args, dict) or not args:
+            return 0.0
+        props = tool_map[name].get("parameters", {}).get("properties", {}) or {}
+        checks = 0
+        passed = 0
+        for key, value in args.items():
+            schema = props.get(key)
+            if not isinstance(schema, dict):
+                continue
+            type_name = str(schema.get("type", "")).lower()
+            desc = str(schema.get("description", "")).lower()
+
+            if type_name == "string":
+                checks += 1
+                if isinstance(value, str) and len(value.strip()) > 0:
+                    passed += 1
+
+            elif type_name == "integer" and isinstance(value, int) and not isinstance(value, bool):
+                if "hour" in desc:
+                    checks += 1
+                    if 0 <= value <= 23:
+                        passed += 1
+                elif "minute" in desc:
+                    checks += 1
+                    if 0 <= value <= 59:
+                        passed += 1
+                elif "number" in desc or "count" in desc:
+                    checks += 1
+                    if value > 0:
+                        passed += 1
+                else:
+                    checks += 1
+                    if value >= 0:
+                        passed += 1
+
+            elif type_name == "number" and isinstance(value, (int, float)) and not isinstance(value, bool):
+                checks += 1
+                if value >= 0:
+                    passed += 1
+
+        return passed / max(1, checks)
+
     def _estimate_action_count(text):
         if not text.strip():
             return 1
@@ -377,11 +445,13 @@ def generate_hybrid(messages, tools, confidence_threshold=0.99):
             stats = _schema_stats(call)
             relevance = _tool_relevance(call.get("name"))
             grounding = _argument_grounding_score(call)
+            arg_quality = _argument_quality_score(call)
             score = (
-                0.45 * stats["required_coverage"]
-                + 0.30 * stats["type_pass"]
+                0.35 * stats["required_coverage"]
+                + 0.25 * stats["type_pass"]
                 + 0.15 * grounding
                 + 0.10 * relevance
+                + 0.15 * arg_quality
                 - 0.20 * stats["unknown_arg_ratio"]
             )
             call_scores.append(
@@ -406,7 +476,7 @@ def generate_hybrid(messages, tools, confidence_threshold=0.99):
             else 0.0
         )
         action_ratio = min(1.0, len(calls) / max(1, action_count_hint))
-        reliability = 0.50 * mean_quality + 0.30 * conf + 0.20 * action_ratio
+        reliability = 0.55 * mean_quality + 0.15 * conf + 0.30 * action_ratio
         return {
             "strong_calls": strong_calls,
             "selected_calls": selected_calls,
