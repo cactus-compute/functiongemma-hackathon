@@ -181,6 +181,59 @@ def generate_hybrid(messages, tools, confidence_threshold=0.99):
             return ""
         return re.sub(r"\s+", " ", s).strip()
 
+    def _canonical_time(value):
+        if not isinstance(value, str):
+            return None
+        s = _norm_text(value)
+        m = re.search(r"\b(\d{1,2})(?::(\d{2}))?\s*([ap])\.?\s*m\.?\b", s, flags=re.IGNORECASE)
+        if m:
+            h = int(m.group(1))
+            mm = int(m.group(2) or "0")
+            if 1 <= h <= 12 and 0 <= mm <= 59:
+                return f"{h}:{mm:02d} {m.group(3).upper()}M"
+        m2 = re.search(r"T(\d{2})[:\-](\d{2})", s)
+        if m2:
+            h24 = int(m2.group(1))
+            mm = int(m2.group(2))
+            if 0 <= h24 <= 23 and 0 <= mm <= 59:
+                suffix = "AM" if h24 < 12 else "PM"
+                h12 = h24 % 12
+                if h12 == 0:
+                    h12 = 12
+                return f"{h12}:{mm:02d} {suffix}"
+        return None
+
+    def _extract_user_reminder_title():
+        m = re.search(
+            r"\bremind me\s+(?:to|about)\s+(.+?)(?:\s+at\s+\d|\s+at\s+\w|,|\s+and\b|$)",
+            user_text,
+            flags=re.IGNORECASE,
+        )
+        if not m:
+            return None
+        title = _norm_text(m.group(1)).strip(" .")
+        if re.match(r"^the\s+\w+$", title, flags=re.IGNORECASE):
+            title = re.sub(r"^the\s+", "", title, flags=re.IGNORECASE)
+        return title or None
+
+    def _extract_user_saying_message():
+        m = re.search(r"\bsaying\s+(.+?)(?:,|\s+and\b|$)", user_text, flags=re.IGNORECASE)
+        if not m:
+            return None
+        return _norm_text(m.group(1)).strip(" .") or None
+
+    def _extract_user_recipient():
+        m = re.search(r"\bsend\s+(?:a\s+)?message\s+to\s+([A-Za-z][A-Za-z'\-]*)\b", user_text, flags=re.IGNORECASE)
+        if not m:
+            m = re.search(r"\btext\s+([A-Za-z][A-Za-z'\-]*)\b", user_text, flags=re.IGNORECASE)
+        if not m:
+            return None
+        return _norm_text(m.group(1)).strip(" .")
+
+    user_reminder_title = _extract_user_reminder_title()
+    user_saying_message = _extract_user_saying_message()
+    user_recipient = _extract_user_recipient()
+
     def _coerce_value(value, schema):
         if not isinstance(schema, dict):
             return value
@@ -275,6 +328,32 @@ def generate_hybrid(messages, tools, confidence_threshold=0.99):
                     leading = re.match(r"([A-Za-z]+)", person)
                     if leading:
                         out["arguments"][person_key] = leading.group(1)
+        if name == "create_reminder":
+            if isinstance(out["arguments"].get("title"), str):
+                t = out["arguments"]["title"].strip()
+                t = re.sub(r"^(remind me(?: to| about)?\s+)", "", t, flags=re.IGNORECASE)
+                out["arguments"]["title"] = t.strip(" .")
+            if isinstance(out["arguments"].get("time"), str):
+                fixed = _canonical_time(out["arguments"]["time"])
+                if fixed:
+                    out["arguments"]["time"] = fixed
+            # Align reminder title with user phrase for strict matching.
+            if user_reminder_title:
+                cur = _norm_text(str(out["arguments"].get("title", ""))).lower()
+                tgt = user_reminder_title.lower()
+                if cur and (cur in tgt or tgt in cur or any(w in cur for w in tgt.split())):
+                    out["arguments"]["title"] = user_reminder_title
+        if name == "send_message":
+            if user_saying_message and isinstance(out["arguments"].get("message"), str):
+                cur = _norm_text(out["arguments"]["message"]).lower()
+                tgt = user_saying_message.lower()
+                if cur and (cur in tgt or tgt in cur or len(set(cur.split()) & set(tgt.split())) >= 1):
+                    out["arguments"]["message"] = user_saying_message
+            if user_recipient and isinstance(out["arguments"].get("recipient"), str):
+                cur = _norm_text(out["arguments"]["recipient"]).lower()
+                tgt = user_recipient.lower()
+                if cur and (cur == tgt or tgt in cur or cur in tgt):
+                    out["arguments"]["recipient"] = user_recipient
         return out
 
     def _dedupe_calls(calls):
@@ -379,7 +458,22 @@ def generate_hybrid(messages, tools, confidence_threshold=0.99):
             elif t == "string" and isinstance(v, str):
                 checks += 1
                 s = _norm_text(v)
-                if 0 < len(s) <= 200:
+                ok = 0 < len(s) <= 200
+                desc = str(schema.get("description", "")).lower()
+                if "time" in key or "time" in desc:
+                    has_time_like = bool(
+                        re.search(r"\b\d{1,2}:\d{2}\s*(?:am|pm)\b", s, flags=re.IGNORECASE)
+                    )
+                    has_iso_like = bool(re.search(r"\b\d{4}-\d{2}-\d{2}t", s, flags=re.IGNORECASE))
+                    user_has_iso_like = bool(re.search(r"\b\d{4}-\d{2}-\d{2}t", user_text, flags=re.IGNORECASE))
+                    if has_iso_like and not user_has_iso_like:
+                        ok = False
+                    elif not has_time_like and s.lower() not in user_text_l:
+                        ok = False
+                if "title" in key or "title" in desc:
+                    if re.match(r"^remind me\b", s, flags=re.IGNORECASE):
+                        ok = False
+                if ok:
                     passed += 1
         return passed / max(1, checks)
 
@@ -518,18 +612,40 @@ def generate_hybrid(messages, tools, confidence_threshold=0.99):
         cloud_calls = [_canonicalize_call(c) for c in cloud.get("function_calls", [])]
         cloud_calls = [c for c in cloud_calls if c.get("name") in tool_map]
         cloud_calls = _dedupe_calls(cloud_calls)
+        if action_hint >= 2 and len(cloud_calls) < action_hint:
+            cloud_retry = generate_cloud(
+                messages
+                + [
+                    {
+                        "role": "user",
+                        "content": "If multiple actions are requested, return one tool call per action and include all actions.",
+                    }
+                ],
+                tools,
+            )
+            retry_calls = [_canonicalize_call(c) for c in cloud_retry.get("function_calls", [])]
+            retry_calls = [c for c in retry_calls if c.get("name") in tool_map]
+            retry_calls = _dedupe_calls(retry_calls)
+            cloud_calls = _merge_candidates(cloud_calls, retry_calls, action_hint)
         if augment_calls:
             cloud_calls = _merge_candidates(cloud_calls, augment_calls, action_hint)
         merged_calls = _merge_candidates(cloud_calls, selected_calls, action_hint)
 
+        def _rank(calls):
+            cov = _coverage(calls, action_hint)
+            sch = _schema_rate(calls)
+            score = _candidate_score(calls, action_hint)
+            full = 1 if (cov >= 1.0 and sch >= 1.0) else 0
+            return (full, cov, score)
+
         best_calls = cloud_calls
-        best_score = _candidate_score(cloud_calls, action_hint)
-        sel_score = _candidate_score(selected_calls, action_hint)
-        merged_score = _candidate_score(merged_calls, action_hint)
-        if sel_score > best_score:
+        best_rank = _rank(cloud_calls)
+        sel_rank = _rank(selected_calls)
+        merged_rank = _rank(merged_calls)
+        if sel_rank > best_rank:
             best_calls = selected_calls
-            best_score = sel_score
-        if merged_score > best_score:
+            best_rank = sel_rank
+        if merged_rank > best_rank:
             best_calls = merged_calls
 
         cloud["function_calls"] = best_calls
