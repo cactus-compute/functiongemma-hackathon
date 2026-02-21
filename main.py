@@ -3,7 +3,6 @@ import sys
 sys.path.insert(0, "cactus/python/src")
 functiongemma_path = "cactus/weights/functiongemma-270m-it"
 
-import asyncio
 import json, os, pickle, re, time
 import threading
 from dataclasses import dataclass
@@ -11,8 +10,6 @@ from typing import Literal
 
 import numpy as np
 from cactus import cactus_init, cactus_complete, cactus_destroy
-from google import genai
-from google.genai import types
 
 
 def generate_cactus(messages, tools):
@@ -56,6 +53,9 @@ def generate_cactus(messages, tools):
 
 def generate_cloud(messages, tools):
     """Run function calling via Gemini Cloud API."""
+    from google import genai
+    from google.genai import types
+
     client = genai.Client(api_key=os.environ.get("GEMINI_API_KEY"))
 
     gemini_tools = [
@@ -343,19 +343,6 @@ def _route_subquery(sub_query, tools):
     return result
 
 
-async def _route_subqueries_taskgroup(sub_queries, tools):
-    """Route decomposed sub-queries concurrently via asyncio.TaskGroup."""
-    results = [None] * len(sub_queries)
-
-    async def run_one(idx, sub_query):
-        results[idx] = await asyncio.to_thread(_route_subquery, sub_query, tools)
-
-    async with asyncio.TaskGroup() as tg:
-        for idx, sub_query in enumerate(sub_queries):
-            tg.create_task(run_one(idx, sub_query))
-    return results
-
-
 def generate_hybrid(messages, tools):
     """Decompose via FunctionGemma, then SVM-route each sub-query."""
     user_text = next(
@@ -378,7 +365,20 @@ def generate_hybrid(messages, tools):
         return result
 
     fan_start = time.time()
-    results = asyncio.run(_route_subqueries_taskgroup(sub_queries, tools))
+    results = [None] * len(sub_queries)
+
+    def _run_one(idx, sq):
+        results[idx] = _route_subquery(sq, tools)
+
+    threads = [
+        threading.Thread(target=_run_one, args=(idx, sq), daemon=True)
+        for idx, sq in enumerate(sub_queries)
+    ]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
     fan_ms = (time.time() - fan_start) * 1000
 
     all_calls = []
