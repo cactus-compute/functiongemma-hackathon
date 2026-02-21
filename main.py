@@ -98,15 +98,19 @@ def generate_hybrid(messages, tools, confidence_threshold=0.99):
     """Baseline hybrid inference strategy; fall back to cloud if Cactus Confidence is below threshold."""
     local = generate_cactus(messages, tools)
 
-    if local["confidence"] >= confidence_threshold:
-        local["source"] = "on-device"
-        return local
+    # Cloud pathway disabled - uncomment to restore
+    # if local["confidence"] >= confidence_threshold:
+    #     local["source"] = "on-device"
+    #     return local
+    #
+    # cloud = generate_cloud(messages, tools)
+    # cloud["source"] = "cloud (fallback)"
+    # cloud["local_confidence"] = local["confidence"]
+    # cloud["total_time_ms"] += local["total_time_ms"]
+    # return cloud
 
-    cloud = generate_cloud(messages, tools)
-    cloud["source"] = "cloud (fallback)"
-    cloud["local_confidence"] = local["confidence"]
-    cloud["total_time_ms"] += local["total_time_ms"]
-    return cloud
+    local["source"] = "on-device"
+    return local
 
 
 def print_result(label, result):
