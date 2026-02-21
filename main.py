@@ -3,10 +3,11 @@ import sys
 sys.path.insert(0, "cactus/python/src")
 functiongemma_path = "cactus/weights/functiongemma-270m-it"
 
-import json, os, time
+import json, math, os, re, time
 from concurrent.futures import ThreadPoolExecutor
 from cactus import cactus_init, cactus_complete, cactus_destroy
 from google import genai
+from query_decompose_regex import decompose_query as _decompose_query_regex
 from google.genai import types
 
 
@@ -76,7 +77,7 @@ def generate_cloud(messages, tools):
     start_time = time.time()
 
     gemini_response = client.models.generate_content(
-        model="gemini-2.5-flash-lite",
+        model="gemini-2.5-flash",
         contents=contents,
         config=types.GenerateContentConfig(tools=gemini_tools),
     )
@@ -98,193 +99,124 @@ def generate_cloud(messages, tools):
     }
 
 
-FAIL_FAST_THRESHOLD = 0.55
-INTENT_WEIGHT_CAP = 0.6
-ARG_IMPLICIT_WEIGHT = 0.55
-TOOL_AMBIGUITY_WEIGHT = 0.6
-THRESHOLD_MODULATION = 0.20
-THRESHOLD_FLOOR = 0.70
+_CATEGORY_MAP = [
+    ("weather", 0), ("forecast", 0), ("location", 0),
+    ("play", 1),
+    ("alarm", 2), ("timer", 3), ("reminder", 4),
+    ("message", 5), ("contact", 5),
+    ("search", 6), ("note", 6),
+]
 
 
-def _last_user_message(messages):
-    for message in reversed(messages):
-        if message.get("role") == "user":
-            return message.get("content", "")
-    return ""
+def _load_svm_gate(path="svm_gate.json"):
+    with open(path) as f:
+        return json.load(f)
 
 
-def _estimate_intent_count(last_user_message):
-    lowered = f" {last_user_message.lower()} "
-    normalized = lowered.replace("after that", "|")
-    normalized = re.sub(r"\b(and|also|then)\b", "|", normalized)
-    normalized = re.sub(r"[,:;?]", "|", normalized)
-    chunks = [chunk.strip() for chunk in normalized.split("|") if chunk.strip()]
-    return max(1, len(chunks))
+_SVM_GATE = _load_svm_gate()
 
 
-def _required_tool_args(tools):
-    required_args = []
+def _extract_features(user_text, tools):
+    """Return [intent_score, tool_count, arg_difficulty, category, single_tool, explicit_value]."""
+    segments = re.split(r"\band\b|\bthen\b|\balso\b|\bafter\b|[,;]", user_text.lower())
+    segments = [s.strip() for s in segments if len(s.strip()) >= 3]
+    intent_score = max(0.0, min((len(segments) - 1) / 2.0, 1.0))
+
+    difficulties = []
     for tool in tools:
-        params = tool.get("parameters", {})
-        properties = params.get("properties", {})
-        for arg_name in params.get("required", []):
-            arg_schema = properties.get(arg_name, {})
-            arg_type = str(arg_schema.get("type", "string")).lower()
-            required_args.append((arg_name, arg_type))
-    return required_args
+        for arg in tool.get("parameters", {}).get("required", []):
+            key = arg.lower()
+            if any(t in key for t in ("time", "duration", "hour", "minute", "when")):
+                difficulties.append(0.8)
+            elif any(t in key for t in ("location", "city", "place")):
+                difficulties.append(0.2)
+            elif any(t in key for t in ("contact", "person", "name", "recipient")):
+                difficulties.append(0.7)
+            elif any(t in key for t in ("query", "search", "term", "keyword")):
+                difficulties.append(0.6)
+            else:
+                difficulties.append(0.4)
+    arg_difficulty = sum(difficulties) / len(difficulties) if difficulties else 0.3
+
+    categories = []
+    for tool in tools:
+        combined = f"{tool.get('name', '').lower()} {tool.get('description', '').lower()}"
+        matched = next((cat for pat, cat in _CATEGORY_MAP if pat in combined), None)
+        if matched is not None:
+            categories.append(matched)
+    category = max(categories) if categories else 7
+
+    has_proper_noun = bool(re.search(r"\b[A-Z][a-z]+\b", user_text))
+    has_numeric = bool(re.search(r"\b\d+(?:[:.]\d+)?\b", user_text))
+    has_quoted = bool(re.search(r"['\"][^'\"]+['\"]", user_text))
+    explicit_value = int(has_proper_noun or has_numeric or has_quoted)
+
+    return [
+        intent_score,
+        float(len(tools)),
+        arg_difficulty,
+        float(category),
+        float(int(len(tools) == 1)),
+        float(explicit_value),
+    ]
 
 
-def _arg_explicitness(last_user_message, tools):
-    required_args = _required_tool_args(tools)
-    if not required_args:
-        return 1.0
+def _svm_predict_local(features, gate=_SVM_GATE):
+    """Return True when SVM predicts the query can be handled locally (label=1)."""
+    mean = gate["mean"]
+    scale = gate["scale"]
+    svs = gate["support_vectors"]
+    dual = gate["dual_coef"][0]
+    intercept = gate["intercept"][0]
+    gamma = gate["gamma"]
 
-    text = last_user_message
-    has_quoted = bool(re.search(r"(['\"])[^'\"]+\1", text))
-    has_proper_noun = bool(re.search(r"\b[A-Z][a-z]+\b", text))
-    has_numeric = bool(re.search(r"\b\d+(?:[:.]\d+)?\b", text))
-    has_date_like = bool(re.search(r"\b(?:\d{1,2}:\d{2}\s?(?:AM|PM|am|pm)?|\d{4}-\d{2}-\d{2}|jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)\b", text))
-    has_bool = bool(re.search(r"\b(true|false|yes|no|on|off)\b", text, flags=re.IGNORECASE))
+    x = [(f - m) / (s if s != 0 else 1.0) for f, m, s in zip(features, mean, scale)]
 
-    explicit = 0
-    for _, arg_type in required_args:
-        if arg_type in {"integer", "number"}:
-            explicit += int(has_numeric or has_date_like)
-        elif arg_type == "boolean":
-            explicit += int(has_bool)
-        else:
-            explicit += int(has_quoted or has_proper_noun or has_numeric or has_date_like)
+    decision = intercept
+    for coef, sv in zip(dual, svs):
+        sq = sum((xi - svi) ** 2 for xi, svi in zip(x, sv))
+        decision += coef * math.exp(-gamma * sq)
 
-    return explicit / len(required_args)
+    return decision > 0
 
 
-def _tokenize_for_jaccard(text):
-    return set(re.findall(r"[a-z0-9]+", text.lower()))
+def _decompose_query(user_text):
+    """Use regex to split a compound query into sub-queries."""
+    return _decompose_query_regex(user_text)
 
 
-def _tool_ambiguity_flag(tools):
-    descriptions = [tool.get("description", "") for tool in tools if tool.get("description")]
-    for i in range(len(descriptions)):
-        for j in range(i + 1, len(descriptions)):
-            left = _tokenize_for_jaccard(descriptions[i])
-            right = _tokenize_for_jaccard(descriptions[j])
-            if not left and not right:
-                continue
-            similarity = len(left & right) / len(left | right)
-            if similarity > 0.4:
-                return 1.0
-    return 0.0
+def _route_subquery(user_text, tools):
+    """SVM gate: predict=1 → local cactus, predict=0 → cloud."""
+    features = _extract_features(user_text, tools)
+    msgs = [{"role": "user", "content": user_text}]
+    if _svm_predict_local(features):
+        result = generate_cactus(msgs, tools)
+        result["source"] = "on-device"
+    else:
+        result = generate_cloud(msgs, tools)
+        result["source"] = "cloud"
+    return result
 
 
-def _compute_complexity(messages, tools):
-    last_user_message = _last_user_message(messages)
-    intent_count = _estimate_intent_count(last_user_message)
-    arg_explicitness = _arg_explicitness(last_user_message, tools)
-    tool_ambiguity_flag = _tool_ambiguity_flag(tools)
-
-    complexity = (
-        min(intent_count / 3.0, INTENT_WEIGHT_CAP)
-        + (1 - arg_explicitness) * ARG_IMPLICIT_WEIGHT
-        + tool_ambiguity_flag * TOOL_AMBIGUITY_WEIGHT
-    )
-    return max(0.0, min(1.0, complexity))
-
-
-def _is_structurally_valid(local_result, tools):
-    tool_map = {tool["name"]: tool for tool in tools}
-    primitive_types = {"string", "integer", "number", "boolean"}
-
-    function_calls = local_result.get("function_calls", [])
-    for call in function_calls:
-        call_name = call.get("name")
-        if call_name not in tool_map:
-            return False
-
-        tool_schema = tool_map[call_name].get("parameters", {})
-        required = tool_schema.get("required", [])
-        properties = tool_schema.get("properties", {})
-        args = call.get("arguments", {}) or {}
-
-        if any(required_arg not in args for required_arg in required):
-            return False
-
-        for arg_name, arg_value in args.items():
-            expected_type = str(properties.get(arg_name, {}).get("type", "")).lower()
-            if expected_type in primitive_types and arg_value is None:
-                return False
-
-    return True
-
-
-def generate_hybrid(messages, tools, confidence_threshold=0.99):
-    """Hybrid strategy: neural decomposition via FunctionGemma, then fan-out."""
+def generate_hybrid(messages, tools):
+    """Decompose via FunctionGemma, then SVM-route each sub-query."""
     user_text = next(
         (m["content"] for m in reversed(messages) if m["role"] == "user"), ""
     )
 
-    # --- neural classification + decomposition in one FunctionGemma call ---
     start = time.time()
-    decompose_tool = [{
-        "type": "function",
-        "function": {
-            "name": "decompose_query",
-            "description": "Break a user request into simple, single-action sub-queries. "
-                           "If the request is already a single action, return it as-is in a one-element list.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "subqueries": {
-                        "type": "array",
-                        "items": {"type": "string"},
-                        "description": "List of simple sub-queries",
-                    }
-                },
-                "required": ["subqueries"],
-            },
-        },
-    }]
-    model = cactus_init(functiongemma_path)
-    raw_str = cactus_complete(
-        model,
-        [{
-            "role": "system", 
-            "content": "You are a query decomposer. Use the decompose_query tool to break multi-hop queries into simple single-hop queries. If the query is single-hop native, return the query as is."
-        },
-         {"role": "user", "content": user_text}],
-        tools=decompose_tool,
-        force_tools=True,
-        max_tokens=256,
-        stop_sequences=["<|im_end|>", "<end_of_turn>"],
-    )
-    cactus_destroy(model)
-
-    sub_queries = None
-    try:
-        raw = json.loads(raw_str)
-        for fc in raw.get("function_calls", []):
-            subs = fc.get("arguments", {}).get("subqueries", [])
-            if isinstance(subs, list) and subs:
-                sub_queries = [s for s in subs if isinstance(s, str) and s.strip()]
-                break
-    except (json.JSONDecodeError, KeyError, TypeError):
-        pass
-
+    sub_queries = _decompose_query(user_text)
     decompose_ms = (time.time() - start) * 1000
 
-    # Model returned <=1 sub-query -> simple request, run directly with original messages
     if not sub_queries or len(sub_queries) <= 1:
-        local = generate_cactus(messages, tools)
-        local["total_time_ms"] += decompose_ms
-        local["source"] = "on-device"
-        return local
-
-    # --- compound: fan-out sub-queries concurrently ---
-    def _run_subquery(sq):
-        return generate_cactus([{"role": "user", "content": sq}], tools)
+        query = sub_queries[0] if sub_queries else user_text
+        result = _route_subquery(query, tools)
+        result["total_time_ms"] += decompose_ms
+        return result
 
     fan_start = time.time()
     with ThreadPoolExecutor(max_workers=len(sub_queries)) as pool:
-        results = list(pool.map(_run_subquery, sub_queries))
+        results = list(pool.map(lambda sq: _route_subquery(sq, tools), sub_queries))
     fan_ms = (time.time() - fan_start) * 1000
 
     all_calls = []
@@ -296,11 +228,12 @@ def generate_hybrid(messages, tools, confidence_threshold=0.99):
                 seen.add(key)
                 all_calls.append(fc)
 
+    any_cloud = any(r.get("source") == "cloud" for r in results)
     return {
         "function_calls": all_calls,
         "total_time_ms": decompose_ms + fan_ms,
         "confidence": min((r.get("confidence", 0) for r in results), default=0),
-        "source": "on-device",
+        "source": "hybrid" if any_cloud else "on-device",
     }
 
 

@@ -66,11 +66,12 @@ def main():
         "gamma": float(clf._gamma),
     }
 
-    print("Support vectors:", clf.support_vectors_)
-    print("Feature means:", scaler.mean_)
-    print("Feature stds:", scaler.scale_)
-    print("\nSerialized params:")
-    print(json.dumps(payload, indent=2))
+    out_path = "svm_gate.json"
+    with open(out_path, "w") as f:
+        json.dump(payload, f, indent=2)
+    print(f"Saved SVM gate params to {out_path}")
+    print(f"  support vectors: {len(clf.support_vectors_)}")
+    print(f"  gamma: {payload['gamma']:.6f}")
 
 
 if __name__ == "__main__":
