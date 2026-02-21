@@ -2,11 +2,10 @@
 """
 Offline trainer for hybrid SVM gate.
 
-Run once (or periodically) to regenerate serialized SVM/scaler arrays that can
-be hardcoded into generate_hybrid without sklearn dependency at inference time.
+Run once (or periodically) to regenerate serialized SVM and scaler via pickle.
 """
 
-import json
+import pickle
 
 import numpy as np
 from sklearn.preprocessing import StandardScaler
@@ -57,21 +56,11 @@ def main():
     clf = SVC(kernel="rbf", C=1.0, gamma="scale", probability=True, class_weight="balanced")
     clf.fit(X_scaled, y)
 
-    payload = {
-        "mean": scaler.mean_.tolist(),
-        "scale": scaler.scale_.tolist(),
-        "support_vectors": clf.support_vectors_.tolist(),
-        "dual_coef": clf.dual_coef_.tolist(),
-        "intercept": clf.intercept_.tolist(),
-        "gamma": float(clf._gamma),
-    }
-
-    out_path = "svm_gate.json"
-    with open(out_path, "w") as f:
-        json.dump(payload, f, indent=2)
-    print(f"Saved SVM gate params to {out_path}")
+    out_path = "svm_gate.pkl"
+    with open(out_path, "wb") as f:
+        pickle.dump({"scaler": scaler, "clf": clf}, f)
+    print(f"Saved SVM gate to {out_path}")
     print(f"  support vectors: {len(clf.support_vectors_)}")
-    print(f"  gamma: {payload['gamma']:.6f}")
 
 
 if __name__ == "__main__":

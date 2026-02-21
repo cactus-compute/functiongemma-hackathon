@@ -3,11 +3,12 @@ import sys
 sys.path.insert(0, "cactus/python/src")
 functiongemma_path = "cactus/weights/functiongemma-270m-it"
 
-import json, math, os, re, time
+import json, os, pickle, re, time
+
+import numpy as np
 from concurrent.futures import ThreadPoolExecutor
 from cactus import cactus_init, cactus_complete, cactus_destroy
 from google import genai
-from query_decompose_regex import decompose_query as _decompose_query_regex
 from google.genai import types
 
 
@@ -99,6 +100,28 @@ def generate_cloud(messages, tools):
     }
 
 
+# Regex-based query decomposition (inlined for single-file submission)
+_DECOMP_CONJUNCTION = re.compile(
+    r"\s*(?:,\s*and\s+|\s+and\s+|\s+then\s+|\s+also\s+|\s+after\s+)\s*",
+    re.IGNORECASE,
+)
+_DECOMP_LIST_SEP = re.compile(r"\s*[,;]\s*")
+_DECOMP_LEADING = re.compile(r"^\s*(?:and|then|also|after)\s+", re.IGNORECASE)
+
+
+def _decompose_query(user_text):
+    """Split compound query into sub-queries via regex."""
+    if not user_text or not user_text.strip():
+        return []
+    text = user_text.strip()
+    segments = _DECOMP_CONJUNCTION.split(text)
+    flat = []
+    for seg in segments:
+        flat.extend(_DECOMP_LIST_SEP.split(seg))
+    result = [_DECOMP_LEADING.sub("", s).strip() for s in flat if s and s.strip()]
+    return result if result else []
+
+
 _CATEGORY_MAP = [
     ("weather", 0), ("forecast", 0), ("location", 0),
     ("play", 1),
@@ -108,9 +131,9 @@ _CATEGORY_MAP = [
 ]
 
 
-def _load_svm_gate(path="svm_gate.json"):
-    with open(path) as f:
-        return json.load(f)
+def _load_svm_gate(path="svm_gate.pkl"):
+    with open(path, "rb") as f:
+        return pickle.load(f)
 
 
 _SVM_GATE = _load_svm_gate()
@@ -163,26 +186,10 @@ def _extract_features(user_text, tools):
 
 def _svm_predict_local(features, gate=_SVM_GATE):
     """Return True when SVM predicts the query can be handled locally (label=1)."""
-    mean = gate["mean"]
-    scale = gate["scale"]
-    svs = gate["support_vectors"]
-    dual = gate["dual_coef"][0]
-    intercept = gate["intercept"][0]
-    gamma = gate["gamma"]
-
-    x = [(f - m) / (s if s != 0 else 1.0) for f, m, s in zip(features, mean, scale)]
-
-    decision = intercept
-    for coef, sv in zip(dual, svs):
-        sq = sum((xi - svi) ** 2 for xi, svi in zip(x, sv))
-        decision += coef * math.exp(-gamma * sq)
-
-    return decision > 0
-
-
-def _decompose_query(user_text):
-    """Use regex to split a compound query into sub-queries."""
-    return _decompose_query_regex(user_text)
+    scaler, clf = gate["scaler"], gate["clf"]
+    X = np.array([features], dtype=float)
+    X_scaled = scaler.transform(X)
+    return clf.predict(X_scaled)[0] == 1
 
 
 def _route_subquery(user_text, tools):
