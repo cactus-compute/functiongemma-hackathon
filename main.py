@@ -340,6 +340,21 @@ def generate_hybrid(messages, tools, confidence_threshold=0.99):
         separators = re.findall(r"\b(?:and|then|also)\b|,", text.lower())
         return max(1, min(4, len(separators) + 1))
 
+    def _expected_tool_names():
+        """Tool names that are semantically relevant to the user text (intent coverage)."""
+        return {
+            name for name in tool_map
+            if _tool_relevance(name) >= 0.15
+        }
+
+    def _intent_coverage_ok(calls):
+        """True if the set of calls covers every expected intent (tool)."""
+        expected = _expected_tool_names()
+        if not expected:
+            return True
+        called = {c.get("name") for c in calls if c.get("name") in tool_map}
+        return expected <= called
+
     def _dedupe_calls(calls):
         out = []
         seen = set()
@@ -439,11 +454,25 @@ def generate_hybrid(messages, tools, confidence_threshold=0.99):
     mean_quality = local_eval["mean_quality"]
     reliability = local_eval["reliability"]
 
-    # Keep baseline strict enough for held-out quality, but allow high-quality local calls.
-    dyn_thr = min(confidence_threshold, 0.72 + 0.05 * max(0, action_count_hint - 1))
+    # Stricter for multi-intent: higher confidence bar and require call count + intent coverage.
+    dyn_thr = min(confidence_threshold, 0.72 + 0.08 * max(0, action_count_hint - 1))
+    multi_intent = action_count_hint >= 2
+    call_count_ok = (
+        len(selected_local_calls) >= action_count_hint
+        if multi_intent
+        else True
+    )
+    # Multi-intent: every expected tool must be called. Single-intent: the call must match an expected tool.
+    intent_covered = (
+        _intent_coverage_ok(selected_local_calls)
+        if multi_intent
+        else (not _expected_tool_names() or any(c.get("name") in _expected_tool_names() for c in selected_local_calls))
+    )
     should_accept_local = (
         bool(local_calls)
         and all_schema_valid
+        and call_count_ok
+        and intent_covered
         and (local_conf >= dyn_thr or (reliability >= 0.70 and local_conf >= 0.45))
     )
 
@@ -458,7 +487,18 @@ def generate_hybrid(messages, tools, confidence_threshold=0.99):
             selected_quality = sum(
                 c["score"] for c in local_eval["strong_calls"]
             ) / len(local_eval["strong_calls"])
-            if selected_quality >= 0.72 and local_conf >= 0.40:
+            repair_call_count_ok = (
+                len(selected_local_calls) >= action_count_hint
+                if multi_intent
+                else True
+            )
+            repair_intent_ok = _intent_coverage_ok(selected_local_calls) if multi_intent else True
+            if (
+                selected_quality >= 0.72
+                and local_conf >= 0.40
+                and repair_call_count_ok
+                and repair_intent_ok
+            ):
                 return {
                     "function_calls": selected_local_calls,
                     "total_time_ms": local.get("total_time_ms", 0),
