@@ -33,8 +33,8 @@ def is_location_query(text: str) -> bool:
 def get_gps_location() -> dict | None:
     """
     Retrieve current GPS coordinates using Apple CoreLocation via pyobjc.
-    Returns dict with lat, lon, address, maps_link — or None if unavailable.
-    Falls back to a simulated location when running without location permissions.
+    Falls back to IP-based geolocation if CoreLocation is denied or unavailable.
+    Returns dict with lat, lon, address, maps_link — or None if all methods fail.
     """
     try:
         import CoreLocation
@@ -42,11 +42,14 @@ def get_gps_location() -> dict | None:
 
         manager = CoreLocation.CLLocationManager.alloc().init()
 
-        # Request authorization (needed on macOS 10.15+)
         auth_status = CoreLocation.CLLocationManager.authorizationStatus()
-        if auth_status == CoreLocation.kCLAuthorizationStatusNotDetermined:
+        # kCLAuthorizationStatusDenied = 2, Restricted = 1, NotDetermined = 0
+        if auth_status in (1, 2):
+            # Permission denied — skip straight to IP fallback
+            return _fallback_location()
+        if auth_status == 0:
             manager.requestWhenInUseAuthorization()
-            time.sleep(1)
+            time.sleep(1.5)
 
         location = manager.location()
         if location is None:
@@ -54,16 +57,18 @@ def get_gps_location() -> dict | None:
 
         coord = location.coordinate()
         lat, lon = coord.latitude, coord.longitude
-        address = _reverse_geocode(lat, lon)
+        if lat == 0.0 and lon == 0.0:
+            return _fallback_location()
 
+        address = _reverse_geocode(lat, lon)
         return {
             "lat": lat,
             "lon": lon,
             "address": address,
             "maps_link": f"https://maps.google.com/?q={lat:.6f},{lon:.6f}",
-            "source": "CoreLocation (on-device)",
+            "source": "CoreLocation (on-device GPS)",
         }
-    except Exception as e:
+    except Exception:
         return _fallback_location()
 
 
@@ -100,16 +105,31 @@ def _reverse_geocode(lat: float, lon: float) -> str:
 
 
 def _fallback_location() -> dict:
-    """Return a plausible simulated location for demo/dev purposes."""
-    # San Francisco (Civic Center) — good default for the hackathon
-    lat, lon = 37.7793, -122.4193
-    return {
-        "lat": lat,
-        "lon": lon,
-        "address": "Civic Center, San Francisco, CA",
-        "maps_link": f"https://maps.google.com/?q={lat},{lon}",
-        "source": "simulated (no GPS permission)",
-    }
+    """
+    Fallback when CoreLocation is unavailable or denied.
+    Uses IP-based geolocation (ipinfo.io, free, no key needed) for real location.
+    """
+    import requests as _req
+    try:
+        resp = _req.get("https://ipinfo.io/json", timeout=4).json()
+        loc_str = resp.get("loc", "")         # "37.7749,-122.4194"
+        city    = resp.get("city", "")
+        region  = resp.get("region", "")
+        country = resp.get("country", "")
+        if loc_str and "," in loc_str:
+            lat, lon = map(float, loc_str.split(","))
+            address = ", ".join(p for p in [city, region, country] if p)
+            return {
+                "lat": lat,
+                "lon": lon,
+                "address": address or f"{lat:.4f}, {lon:.4f}",
+                "maps_link": f"https://maps.google.com/?q={lat:.6f},{lon:.6f}",
+                "source": "IP geolocation (ipinfo.io)",
+            }
+    except Exception:
+        pass
+    # Last resort: return None so callers know it truly failed
+    return None
 
 
 def inject_location_into_command(text: str, location: dict) -> str:

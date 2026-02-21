@@ -3,7 +3,9 @@ import sys, os
 sys.path.insert(0, "cactus/python/src")
 sys.path.insert(0, ".")
 
-os.environ.setdefault("GOOGLE_MAPS_API_KEY", "AIzaSyA5IPZCbVqBCbvOK24erpnIShSRltBWgYE")
+# Load from environment — set GOOGLE_MAPS_API_KEY in your shell or .env file
+if not os.environ.get("GOOGLE_MAPS_API_KEY"):
+    raise EnvironmentError("GOOGLE_MAPS_API_KEY is not set. See .env.example.")
 
 from handsfree.executor import execute
 

@@ -188,12 +188,12 @@ def _get_directions(args):
         distance = leg["distance"]["text"]
         start    = leg["start_address"]
         end      = leg["end_address"]
-        steps = [
-            s["html_instructions"].replace("<b>", "").replace("</b>", "")
-                                  .replace("<div style=\"font-size:0.9em\">", " — ")
-                                  .replace("</div>", "")
-            for s in leg["steps"][:5]
-        ]
+        import re as _re
+        def _strip_html(h):
+            h = h.replace("<wbr/>", "").replace("<wbr>", "")
+            h = h.replace('<div style="font-size:0.9em">', " — ").replace("</div>", "")
+            return _re.sub(r"<[^>]+>", "", h).strip()
+        steps = [_strip_html(s["html_instructions"]) for s in leg["steps"][:6]]
         maps_url = (
             f"https://www.google.com/maps/dir/?api=1"
             f"&origin={requests.utils.quote(start)}"
@@ -312,7 +312,7 @@ def _get_current_location(args):
         from handsfree.location import get_gps_location
         loc = get_gps_location()
         if not loc:
-            raise RuntimeError("GPS unavailable")
+            raise RuntimeError("Could not determine location — CoreLocation denied and IP lookup failed")
 
         lat, lon = loc["lat"], loc["lon"]
 
