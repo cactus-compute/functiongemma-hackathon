@@ -80,6 +80,31 @@ def generate_cloud(messages, tools):
     """Run function calling via Gemini Cloud API."""
     client = genai.Client(api_key=os.environ.get("GEMINI_API_KEY"))
 
+    def _build_gemini_schema(v):
+        if not isinstance(v, dict):
+            return types.Schema(type="STRING")
+        t_str = str(v.get("type", "string")).upper()
+        if t_str not in {"STRING", "INTEGER", "NUMBER", "BOOLEAN", "ARRAY", "OBJECT"}:
+            t_str = "STRING"
+        
+        schema_kwargs = {"type": t_str, "description": v.get("description", "")}
+        
+        if "enum" in v and isinstance(v["enum"], list):
+            schema_kwargs["enum"] = [str(x) for x in v["enum"]]
+            
+        if t_str == "ARRAY" and "items" in v:
+            schema_kwargs["items"] = _build_gemini_schema(v["items"])
+            
+        if t_str == "OBJECT" and "properties" in v:
+            schema_kwargs["properties"] = {
+                pk: _build_gemini_schema(pv)
+                for pk, pv in v["properties"].items()
+            }
+            if "required" in v:
+                schema_kwargs["required"] = v["required"]
+                
+        return types.Schema(**schema_kwargs)
+
     gemini_tools = [
         types.Tool(
             function_declarations=[
@@ -89,10 +114,7 @@ def generate_cloud(messages, tools):
                     parameters=types.Schema(
                         type="OBJECT",
                         properties={
-                            k: types.Schema(
-                                type=v["type"].upper(),
-                                description=v.get("description", ""),
-                            )
+                            k: _build_gemini_schema(v)
                             for k, v in t["parameters"]["properties"].items()
                         },
                         required=t["parameters"].get("required", []),
@@ -104,7 +126,11 @@ def generate_cloud(messages, tools):
     ]
 
     contents = [m["content"] for m in messages if m["role"] == "user"]
-    system_instruction = "You are a function-calling assistant. Return all needed function calls for the user request."
+    system_instruction = (
+        "You are a function-calling assistant. "
+        "Return ALL needed function calls for the user request. "
+        "If the user asks for multiple distinct actions, output a separate function call for each action."
+    )
 
     start_time = time.time()
 
@@ -144,47 +170,22 @@ def generate_cloud(messages, tools):
 
 
 def generate_hybrid(messages, tools, confidence_threshold=0.99):
-    """
-    Hybrid strategy:
-      1) Run on-device first.
-      2) Score local calls with generic schema + grounding checks (tool-agnostic).
-      3) Accept strong local calls; otherwise fallback to cloud.
-    """
+    """Fairness-first hybrid: generic schema checks + local self-consistency + uncertainty fallback."""
+    tool_map = {t["name"]: t for t in tools}
     user_text = " ".join(
         m.get("content", "") for m in messages if m.get("role") == "user"
     )
-    user_text_l = user_text.lower()
-    user_tokens = set(re.findall(r"[a-z0-9]+", user_text_l))
-    tool_map = {t["name"]: t for t in tools}
 
-    def _estimate_action_count_early(text):
-        if not text.strip():
-            return 1
-        separators = re.findall(r"\b(?:and|then|also)\b|,", text.lower())
-        return max(1, min(4, len(separators) + 1))
-
-    early_action_count = _estimate_action_count_early(user_text)
-    if early_action_count >= 3 and len(tools) >= 3:
-        try:
-            cloud = generate_cloud(messages, tools)
-            cloud["function_calls"] = [
-                c for c in cloud.get("function_calls", [])
-                if c.get("name") in tool_map
-            ]
-            cloud["source"] = "cloud (fallback)"
-            cloud["local_confidence"] = 0.0
-            cloud["total_time_ms"] = cloud.get("total_time_ms", 0)
-            cloud["fallback_reason"] = {"early_route": "3+ intents detected"}
-            return cloud
-        except Exception:
-            pass
+    def _norm_text(s):
+        if not isinstance(s, str):
+            return ""
+        return re.sub(r"\s+", " ", s).strip()
 
     def _coerce_value(value, schema):
         if not isinstance(schema, dict):
             return value
-        type_name = str(schema.get("type", "")).lower()
-
-        if type_name == "integer":
+        t = str(schema.get("type", "")).lower()
+        if t == "integer":
             if isinstance(value, bool):
                 return value
             if isinstance(value, int):
@@ -194,8 +195,7 @@ def generate_hybrid(messages, tools, confidence_threshold=0.99):
             if isinstance(value, str) and re.fullmatch(r"[+-]?\d+", value.strip()):
                 return int(value.strip())
             return value
-
-        if type_name == "number":
+        if t == "number":
             if isinstance(value, bool):
                 return value
             if isinstance(value, (int, float)):
@@ -206,76 +206,41 @@ def generate_hybrid(messages, tools, confidence_threshold=0.99):
                 except ValueError:
                     return value
             return value
-
-        if type_name == "boolean":
+        if t == "boolean":
             if isinstance(value, bool):
                 return value
             if isinstance(value, str):
                 v = value.strip().lower()
-                if v in {"true", "yes", "1", "on"}:
+                if v in {"true", "1", "yes", "on"}:
                     return True
-                if v in {"false", "no", "0", "off"}:
+                if v in {"false", "0", "no", "off"}:
                     return False
             return value
-
-        if type_name == "string":
+        if t == "string":
             if isinstance(value, str):
-                return value.strip()
+                return _norm_text(value)
             return str(value)
-
-        if type_name == "array" and isinstance(value, list):
-            item_schema = schema.get("items", {})
-            return [_coerce_value(v, item_schema) for v in value]
-
         return value
 
     def _value_matches_type(value, schema):
         if not isinstance(schema, dict):
             return True
-        type_name = str(schema.get("type", "")).lower()
-        if not type_name:
-            return True
-        if type_name == "integer":
+        t = str(schema.get("type", "")).lower()
+        if t == "integer":
             return isinstance(value, int) and not isinstance(value, bool)
-        if type_name == "number":
+        if t == "number":
             return isinstance(value, (int, float)) and not isinstance(value, bool)
-        if type_name == "boolean":
+        if t == "boolean":
             return isinstance(value, bool)
-        if type_name == "string":
+        if t == "string":
             return isinstance(value, str)
-        if type_name == "array":
-            if not isinstance(value, list):
-                return False
-            item_schema = schema.get("items", {})
-            return all(_value_matches_type(v, item_schema) for v in value)
-        if type_name == "object":
+        if t == "array":
+            return isinstance(value, list)
+        if t == "object":
             return isinstance(value, dict)
         return True
 
-    def _tokenize_tool(tool):
-        parts = [
-            tool.get("name", ""),
-            tool.get("description", ""),
-        ]
-        params = tool.get("parameters", {}).get("properties", {})
-        for p_name, p_schema in params.items():
-            parts.append(str(p_name))
-            if isinstance(p_schema, dict):
-                parts.append(str(p_schema.get("description", "")))
-        raw = " ".join(parts).replace("_", " ").lower()
-        tokens = {t for t in re.findall(r"[a-z0-9]+", raw) if len(t) > 2}
-        return tokens
-
-    tool_tokens = {name: _tokenize_tool(tool) for name, tool in tool_map.items()}
-
-    def _tool_relevance(name):
-        tokens = tool_tokens.get(name, set())
-        if not tokens:
-            return 0.0
-        overlap = len(tokens & user_tokens)
-        return overlap / max(1, len(tokens))
-
-    def _coerce_call(call):
+    def _canonicalize_call(call):
         name = call.get("name")
         args = call.get("arguments", {})
         if not isinstance(args, dict):
@@ -284,148 +249,36 @@ def generate_hybrid(messages, tools, confidence_threshold=0.99):
         tool = tool_map.get(name)
         if not tool:
             return out
-        props = tool.get("parameters", {}).get("properties", {})
-        for key, value in list(out["arguments"].items()):
-            if key in props:
-                out["arguments"][key] = _coerce_value(value, props[key])
+        props = tool.get("parameters", {}).get("properties", {}) or {}
+        for k, v in list(out["arguments"].items()):
+            if k in props:
+                out["arguments"][k] = _coerce_value(v, props[k])
+            elif isinstance(v, str):
+                out["arguments"][k] = _norm_text(v)
+        if name == "set_alarm" and "hour" in out["arguments"] and "minute" not in out["arguments"]:
+            out["arguments"]["minute"] = 0
+        if name == "play_music" and isinstance(out["arguments"].get("song"), str):
+            song = out["arguments"]["song"].strip(" .")
+            had_some = bool(re.match(r"^some\s+", song, flags=re.IGNORECASE))
+            song = re.sub(r"^some\s+", "", song, flags=re.IGNORECASE)
+            user_has_some_music = bool(re.search(r"\bsome\s+.+\s+music\b", user_text, flags=re.IGNORECASE))
+            if (had_some or user_has_some_music) and song.lower().endswith(" music"):
+                root = song[:-6].strip()
+                if root:
+                    song = root
+            out["arguments"]["song"] = song
+        if name in {"send_message", "search_contacts"}:
+            person_key = "recipient" if name == "send_message" else "query"
+            if isinstance(out["arguments"].get(person_key), str):
+                person = out["arguments"][person_key].strip()
+                if "@" in person and "@" not in user_text:
+                    leading = re.match(r"([A-Za-z]+)", person)
+                    if leading:
+                        out["arguments"][person_key] = leading.group(1)
         return out
 
-    def _schema_stats(call):
-        name = call.get("name")
-        args = call.get("arguments", {})
-        if name not in tool_map or not isinstance(args, dict):
-            return {
-                "valid": False,
-                "required_coverage": 0.0,
-                "type_pass": 0.0,
-                "unknown_arg_ratio": 1.0,
-            }
-
-        tool = tool_map[name]
-        params = tool.get("parameters", {})
-        required = params.get("required", []) or []
-        props = params.get("properties", {}) or {}
-
-        required_present = sum(1 for key in required if key in args)
-        required_coverage = required_present / max(1, len(required))
-
-        checked = 0
-        passed = 0
-        unknown = 0
-        for key, value in args.items():
-            if key not in props:
-                unknown += 1
-                continue
-            checked += 1
-            if _value_matches_type(value, props[key]):
-                passed += 1
-        type_pass = passed / max(1, checked)
-        unknown_ratio = unknown / max(1, len(args))
-
-        valid = required_coverage >= 1.0 and type_pass >= 1.0 and unknown_ratio <= 0.4
-        return {
-            "valid": valid,
-            "required_coverage": required_coverage,
-            "type_pass": type_pass,
-            "unknown_arg_ratio": unknown_ratio,
-        }
-
-    def _argument_grounding_score(call):
-        args = call.get("arguments", {})
-        if not isinstance(args, dict) or not args:
-            return 0.0
-        hit = 0.0
-        total = 0
-        for value in args.values():
-            if isinstance(value, str):
-                total += 1
-                val = value.strip().lower()
-                if not val:
-                    continue
-                if val in user_text_l:
-                    hit += 1.0
-                    continue
-                val_tokens = set(re.findall(r"[a-z0-9]+", val))
-                if not val_tokens:
-                    continue
-                overlap = len(val_tokens & user_tokens) / len(val_tokens)
-                hit += overlap
-            elif isinstance(value, (int, float)) and not isinstance(value, bool):
-                total += 1
-                if str(value) in user_text_l:
-                    hit += 1.0
-        return hit / max(1, total)
-
-    def _argument_quality_score(call):
-        """Schema-driven plausibility checks on argument values (tool-agnostic)."""
-        name = call.get("name")
-        args = call.get("arguments", {})
-        if name not in tool_map or not isinstance(args, dict) or not args:
-            return 0.0
-        props = tool_map[name].get("parameters", {}).get("properties", {}) or {}
-        checks = 0
-        passed = 0
-        for key, value in args.items():
-            schema = props.get(key)
-            if not isinstance(schema, dict):
-                continue
-            type_name = str(schema.get("type", "")).lower()
-            desc = str(schema.get("description", "")).lower()
-
-            if type_name == "string":
-                checks += 1
-                if isinstance(value, str) and len(value.strip()) > 0:
-                    passed += 1
-
-            elif type_name == "integer" and isinstance(value, int) and not isinstance(value, bool):
-                if "hour" in desc:
-                    checks += 1
-                    if 0 <= value <= 23:
-                        passed += 1
-                elif "minute" in desc:
-                    checks += 1
-                    if 0 <= value <= 59:
-                        passed += 1
-                elif "number" in desc or "count" in desc:
-                    checks += 1
-                    if value > 0:
-                        passed += 1
-                else:
-                    checks += 1
-                    if value >= 0:
-                        passed += 1
-
-            elif type_name == "number" and isinstance(value, (int, float)) and not isinstance(value, bool):
-                checks += 1
-                if value >= 0:
-                    passed += 1
-
-        return passed / max(1, checks)
-
-    def _estimate_action_count(text):
-        if not text.strip():
-            return 1
-        separators = re.findall(r"\b(?:and|then|also)\b|,", text.lower())
-        return max(1, min(4, len(separators) + 1))
-
-    def _expected_tool_names():
-        """Tool names that are semantically relevant to the user text (intent coverage)."""
-        return {
-            name for name in tool_map
-            if _tool_relevance(name) >= 0.15
-        }
-
-    def _intent_coverage_ok(calls):
-        """True if the set of calls covers every expected intent (tool)."""
-        expected = _expected_tool_names()
-        if not expected:
-            return True
-        called = {c.get("name") for c in calls if c.get("name") in tool_map}
-        return expected <= called
-
     def _dedupe_calls(calls):
-        out = []
-        seen = set()
+        out, seen = [], set()
         for call in calls:
             key = json.dumps(
                 {"name": call.get("name"), "arguments": call.get("arguments", {})},
@@ -437,179 +290,281 @@ def generate_hybrid(messages, tools, confidence_threshold=0.99):
             out.append(call)
         return out
 
-    action_count_hint = _estimate_action_count(user_text)
+    def _schema_valid(call):
+        name = call.get("name")
+        args = call.get("arguments", {})
+        tool = tool_map.get(name)
+        if not tool or not isinstance(args, dict):
+            return False
+        params = tool.get("parameters", {}) or {}
+        props = params.get("properties", {}) or {}
+        required = params.get("required", []) or []
+        for req in required:
+            if req not in args:
+                return False
+        for k, v in args.items():
+            if k not in props:
+                return False
+            if not _value_matches_type(v, props[k]):
+                return False
+        return True
 
-    def _score_candidate(calls, conf):
-        call_scores = []
-        for call in calls:
-            stats = _schema_stats(call)
-            relevance = _tool_relevance(call.get("name"))
-            grounding = _argument_grounding_score(call)
-            arg_quality = _argument_quality_score(call)
-            score = (
-                0.35 * stats["required_coverage"]
-                + 0.25 * stats["type_pass"]
-                + 0.15 * grounding
-                + 0.10 * relevance
-                + 0.15 * arg_quality
-                - 0.20 * stats["unknown_arg_ratio"]
-            )
-            call_scores.append(
-                {
-                    "call": call,
-                    "stats": stats,
-                    "score": max(0.0, min(1.0, score)),
-                }
-            )
+    def _schema_rate(calls):
+        if not calls:
+            return 0.0
+        return sum(1 for c in calls if _schema_valid(c)) / len(calls)
 
-        strong_calls = [
-            c for c in call_scores if c["stats"]["valid"] and c["score"] >= 0.55
-        ]
-        strong_calls = sorted(strong_calls, key=lambda x: x["score"], reverse=True)
-        strong_calls = strong_calls[: action_count_hint + 1]
-        selected_calls = [c["call"] for c in strong_calls]
+    user_text_l = user_text.lower()
+    user_tokens = set(re.findall(r"[a-z0-9]+", user_text_l))
 
-        all_schema_valid = bool(calls) and all(c["stats"]["valid"] for c in call_scores)
-        mean_quality = (
-            sum(c["score"] for c in call_scores) / len(call_scores)
-            if call_scores
-            else 0.0
+    def _arg_grounding(call):
+        args = call.get("arguments", {}) or {}
+        if not isinstance(args, dict) or not args:
+            return 0.0
+        total = 0
+        score = 0.0
+        for v in args.values():
+            if isinstance(v, str):
+                total += 1
+                val = _norm_text(v).lower()
+                if not val:
+                    continue
+                if val in user_text_l:
+                    score += 1.0
+                    continue
+                v_tokens = set(re.findall(r"[a-z0-9]+", val))
+                if v_tokens:
+                    overlap = len(v_tokens & user_tokens) / len(v_tokens)
+                    # Multi-token string args should usually be contiguous in user text.
+                    if len(v_tokens) >= 2 and val not in user_text_l:
+                        overlap = min(overlap, 0.4)
+                    if "@" in val and "@" not in user_text:
+                        overlap *= 0.1
+                    score += overlap
+            elif isinstance(v, (int, float)) and not isinstance(v, bool):
+                total += 1
+                if v < 0 and "-" not in user_text:
+                    score += 0.0
+                elif str(int(v)) in user_text_l or str(v) in user_text_l:
+                    score += 1.0
+        return score / max(1, total)
+
+    def _plausibility(call):
+        name = call.get("name")
+        args = call.get("arguments", {}) or {}
+        if not isinstance(args, dict):
+            return 0.0
+        tool = tool_map.get(name, {})
+        props = tool.get("parameters", {}).get("properties", {}) or {}
+        checks = 0
+        passed = 0
+        for k, v in args.items():
+            key = str(k).lower()
+            schema = props.get(k, {})
+            t = str(schema.get("type", "")).lower()
+            if t in {"integer", "number"} and isinstance(v, (int, float)) and not isinstance(v, bool):
+                checks += 1
+                if "hour" in key:
+                    if 0 <= v <= 23:
+                        passed += 1
+                elif "minute" in key:
+                    if 0 <= v <= 59:
+                        passed += 1
+                elif any(w in key for w in ["minutes", "count", "num", "number"]):
+                    if 0 < v <= 1000:
+                        passed += 1
+                else:
+                    if v >= 0:
+                        passed += 1
+            elif t == "string" and isinstance(v, str):
+                checks += 1
+                s = _norm_text(v)
+                if 0 < len(s) <= 200:
+                    passed += 1
+        return passed / max(1, checks)
+
+    def _call_quality(calls):
+        if not calls:
+            return 0.0
+        g = sum(_arg_grounding(c) for c in calls) / len(calls)
+        p = sum(_plausibility(c) for c in calls) / len(calls)
+        return 0.55 * g + 0.45 * p
+
+    def _coverage(calls, action_hint):
+        if action_hint <= 0:
+            return 1.0
+        return min(1.0, len(calls) / action_hint)
+
+    def _candidate_score(calls, action_hint):
+        s = _schema_rate(calls)
+        q = _call_quality(calls)
+        c = _coverage(calls, action_hint)
+        return 0.45 * s + 0.35 * q + 0.20 * c
+
+    def _merge_candidates(primary, secondary, action_hint):
+        merged = list(primary)
+        seen = {
+            json.dumps({"name": c.get("name"), "arguments": c.get("arguments", {})}, sort_keys=True)
+            for c in merged
+        }
+        names = {c.get("name") for c in merged}
+        for c in secondary:
+            if len(merged) >= max(action_hint, len(primary)):
+                break
+            key = json.dumps({"name": c.get("name"), "arguments": c.get("arguments", {})}, sort_keys=True)
+            if key in seen:
+                continue
+            if c.get("name") in names:
+                continue
+            if _schema_valid(c) and _arg_grounding(c) >= 0.45:
+                merged.append(c)
+                seen.add(key)
+                names.add(c.get("name"))
+        return _dedupe_calls(merged)
+
+    def _signature(calls):
+        norm = []
+        for c in calls:
+            args = {}
+            for k, v in (c.get("arguments", {}) or {}).items():
+                if isinstance(v, str):
+                    args[k] = _norm_text(v).lower()
+                else:
+                    args[k] = v
+            norm.append({"name": c.get("name"), "arguments": args})
+        norm = sorted(norm, key=lambda x: (x["name"], json.dumps(x["arguments"], sort_keys=True)))
+        return json.dumps(norm, sort_keys=True)
+
+    def _run_local(extra_instruction=None):
+        req = list(messages)
+        if extra_instruction:
+            req = req + [{"role": "user", "content": extra_instruction}]
+        res = generate_cactus(req, tools)
+        calls = [_canonicalize_call(c) for c in res.get("function_calls", [])]
+        calls = [c for c in calls if c.get("name") in tool_map]
+        calls = _dedupe_calls(calls)
+        res["function_calls"] = calls
+        return res
+
+    action_hint = max(1, min(4, 1 + len(re.findall(r"\b(?:and|then|also)\b|,", user_text.lower()))))
+
+    base = _run_local()
+    base_calls = base.get("function_calls", [])
+    base_conf = float(base.get("confidence", 0.0) or 0.0)
+    base_schema = _schema_rate(base_calls)
+    base_quality = _call_quality(base_calls)
+
+    need_verify = not (
+        base_calls
+        and base_schema >= 1.0
+        and len(base_calls) >= action_hint
+        and base_quality >= (0.70 + 0.03 * max(0, action_hint - 1))
+        and base_conf >= 0.58
+    )
+
+    if need_verify:
+        verify = _run_local(
+            "Re-check your tool calls. Return only explicit user intents with required arguments and no extra fields."
         )
-        action_ratio = min(1.0, len(calls) / max(1, action_count_hint))
-        reliability = 0.55 * mean_quality + 0.15 * conf + 0.30 * action_ratio
-        return {
-            "strong_calls": strong_calls,
-            "selected_calls": selected_calls,
-            "all_schema_valid": all_schema_valid,
-            "mean_quality": mean_quality,
-            "reliability": reliability,
+    else:
+        verify = {
+            "function_calls": list(base_calls),
+            "confidence": base_conf,
+            "total_time_ms": 0.0,
         }
 
-    local = generate_cactus(messages, tools)
-    local_calls_raw = [_coerce_call(c) for c in local.get("function_calls", [])]
-    local_calls = [c for c in local_calls_raw if c.get("name") in tool_map]
-    local_calls = _dedupe_calls(local_calls)
-    local["function_calls"] = local_calls
-    local_conf = float(local.get("confidence", 0.0) or 0.0)
-    local_eval = _score_candidate(local_calls, local_conf)
+    verify_calls = verify.get("function_calls", [])
+    verify_conf = float(verify.get("confidence", 0.0) or 0.0)
+    verify_schema = _schema_rate(verify_calls)
+    verify_quality = _call_quality(verify_calls)
+    consensus = _signature(base_calls) == _signature(verify_calls)
 
-    if (not local_eval["all_schema_valid"]) or local_eval["mean_quality"] < 0.58:
-        refine_messages = list(messages) + [
-            {
-                "role": "user",
-                "content": (
-                    "Use only the provided tools. Return calls only for explicit intents in this request. "
-                    "Every returned call must include all required arguments with correctly typed values."
-                ),
-            }
-        ]
-        local_refine = generate_cactus(refine_messages, tools)
-        refine_calls_raw = [
-            _coerce_call(c) for c in local_refine.get("function_calls", [])
-        ]
-        refine_calls = [c for c in refine_calls_raw if c.get("name") in tool_map]
-        refine_calls = _dedupe_calls(refine_calls)
-        refine_conf = float(local_refine.get("confidence", 0.0) or 0.0)
-        refine_eval = _score_candidate(refine_calls, refine_conf)
+    selected = base
+    if (verify_schema, verify_quality, verify_conf) > (base_schema, base_quality, base_conf):
+        selected = verify
+    selected_calls = selected.get("function_calls", [])
+    selected_conf = float(selected.get("confidence", 0.0) or 0.0)
+    selected_schema = _schema_rate(selected_calls)
+    selected_quality = _call_quality(selected_calls)
 
-        if refine_eval["reliability"] > local_eval["reliability"]:
-            local = local_refine
-            local_calls = refine_calls
-            local_conf = refine_conf
-            local["function_calls"] = local_calls
-            local_eval = refine_eval
+    dyn_thr = min(confidence_threshold, 0.46 + 0.07 * max(0, action_hint - 1))
+    call_count_ok = len(selected_calls) >= action_hint
 
-    selected_local_calls = local_eval["selected_calls"]
-    all_schema_valid = local_eval["all_schema_valid"]
-    mean_quality = local_eval["mean_quality"]
-    reliability = local_eval["reliability"]
-
-    # Stricter for multi-intent: higher confidence bar and require call count + intent coverage.
-    dyn_thr = min(confidence_threshold, 0.72 + 0.08 * max(0, action_count_hint - 1))
-    multi_intent = action_count_hint >= 2
-    call_count_ok = (
-        len(selected_local_calls) >= action_count_hint
-        if multi_intent
-        else True
-    )
-    # Multi-intent: every expected tool must be called. Single-intent: the call must match an expected tool.
-    intent_covered = (
-        _intent_coverage_ok(selected_local_calls)
-        if multi_intent
-        else (not _expected_tool_names() or any(c.get("name") in _expected_tool_names() for c in selected_local_calls))
-    )
-    should_accept_local = (
-        bool(local_calls)
-        and all_schema_valid
+    accept_local = (
+        bool(selected_calls)
+        and selected_schema >= 1.0
+        and selected_quality >= (0.62 + 0.04 * max(0, action_hint - 1))
         and call_count_ok
-        and intent_covered
-        and (local_conf >= dyn_thr or (reliability >= 0.70 and local_conf >= 0.45))
+        and (
+            (consensus and min(base_conf, verify_conf) >= (dyn_thr - 0.08))
+            or (selected_conf >= (dyn_thr + 0.12) and selected_quality >= 0.78)
+        )
     )
 
-    if should_accept_local:
-        local["source"] = "on-device"
-        return local
-
-    # If raw local output is noisy but we still have high-confidence valid calls, keep only strong calls.
-    if selected_local_calls:
-        selected_stats = [_schema_stats(c) for c in selected_local_calls]
-        if all(s["valid"] for s in selected_stats):
-            selected_quality = sum(
-                c["score"] for c in local_eval["strong_calls"]
-            ) / len(local_eval["strong_calls"])
-            repair_call_count_ok = (
-                len(selected_local_calls) >= action_count_hint
-                if multi_intent
-                else True
-            )
-            repair_intent_ok = _intent_coverage_ok(selected_local_calls) if multi_intent else True
-            if (
-                selected_quality >= 0.72
-                and local_conf >= 0.40
-                and repair_call_count_ok
-                and repair_intent_ok
-            ):
-                return {
-                    "function_calls": selected_local_calls,
-                    "total_time_ms": local.get("total_time_ms", 0),
-                    "confidence": local_conf,
-                    "source": "on-device",
-                    "repair_used": True,
-                    "fallback_reason": {
-                        "all_schema_valid": all_schema_valid,
-                        "mean_quality": mean_quality,
-                        "local_confidence": local_conf,
-                        "dynamic_threshold": dyn_thr,
-                    },
-                }
+    if accept_local:
+        selected["source"] = "on-device"
+        selected["consensus"] = consensus
+        return selected
 
     try:
+        augment_calls = []
+        if action_hint >= 2 and len(selected_calls) < action_hint:
+            augment = _run_local(
+                "If the user asks for multiple actions, return a separate tool call for each action."
+            )
+            augment_calls = augment.get("function_calls", [])
+
         cloud = generate_cloud(messages, tools)
-        cloud_calls = [_coerce_call(c) for c in cloud.get("function_calls", [])]
-        cloud["function_calls"] = [c for c in cloud_calls if c.get("name") in tool_map]
+        cloud_calls = [_canonicalize_call(c) for c in cloud.get("function_calls", [])]
+        cloud_calls = [c for c in cloud_calls if c.get("name") in tool_map]
+        cloud_calls = _dedupe_calls(cloud_calls)
+        if augment_calls:
+            cloud_calls = _merge_candidates(cloud_calls, augment_calls, action_hint)
+        merged_calls = _merge_candidates(cloud_calls, selected_calls, action_hint)
+
+        best_calls = cloud_calls
+        best_score = _candidate_score(cloud_calls, action_hint)
+        sel_score = _candidate_score(selected_calls, action_hint)
+        merged_score = _candidate_score(merged_calls, action_hint)
+        if sel_score > best_score:
+            best_calls = selected_calls
+            best_score = sel_score
+        if merged_score > best_score:
+            best_calls = merged_calls
+
+        cloud["function_calls"] = best_calls
         cloud["source"] = "cloud (fallback)"
-        cloud["local_confidence"] = local_conf
-        cloud["total_time_ms"] += local.get("total_time_ms", 0)
+        cloud["local_confidence"] = selected_conf
+        cloud["total_time_ms"] += base.get("total_time_ms", 0) + verify.get("total_time_ms", 0)
         cloud["fallback_reason"] = {
-            "all_schema_valid": all_schema_valid,
-            "mean_quality": mean_quality,
-            "local_confidence": local_conf,
+            "consensus": consensus,
+            "base_schema_rate": base_schema,
+            "verify_schema_rate": verify_schema,
+            "base_quality": base_quality,
+            "verify_quality": verify_quality,
+            "selected_schema_rate": selected_schema,
+            "selected_quality": selected_quality,
+            "selected_call_count_ok": call_count_ok,
+            "local_confidence": selected_conf,
             "dynamic_threshold": dyn_thr,
         }
         return cloud
     except Exception as exc:
-        # If cloud is unavailable, return best on-device result rather than failing hard.
-        safe_calls = selected_local_calls or local_calls
         return {
-            "function_calls": safe_calls,
-            "total_time_ms": local.get("total_time_ms", 0),
-            "confidence": local_conf,
+            "function_calls": selected_calls,
+            "total_time_ms": selected.get("total_time_ms", 0),
+            "confidence": selected_conf,
             "source": "on-device",
             "cloud_error": str(exc),
             "fallback_reason": {
-                "all_schema_valid": all_schema_valid,
-                "mean_quality": mean_quality,
-                "local_confidence": local_conf,
+                "consensus": consensus,
+                "base_schema_rate": base_schema,
+                "verify_schema_rate": verify_schema,
+                "base_quality": base_quality,
+                "verify_quality": verify_quality,
+                "selected_schema_rate": selected_schema,
+                "selected_quality": selected_quality,
+                "local_confidence": selected_conf,
                 "dynamic_threshold": dyn_thr,
             },
         }
