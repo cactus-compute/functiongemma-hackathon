@@ -31,6 +31,7 @@ def generate_cactus(messages, tools):
     try:
         raw = json.loads(raw_str)
     except json.JSONDecodeError:
+        print(f"[ERROR] Failed to parse Cactus output: {raw_str!r}")
         return {
             "function_calls": [],
             "total_time_ms": 0,

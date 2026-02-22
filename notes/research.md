@@ -58,6 +58,16 @@ Default is 2 (auto-selects top-2 relevant tools). Setting to 0 disables Tool RAG
 - Found general post about Cactus v1.7 with hybrid inference features
 - Check again roughly once per hour
 
+## Reddit r/cactuscompute — Checked Feb 21, 2026 1:31 PM PST
+Recent posts during hackathon day:
+1. **"LOL Classic Hackathon Leakage"** (u/That-Cry3210, ~1 hr ago) — Body text not retrievable. Could be about test set patterns or someone sharing info.
+2. **"Error: gemini-2.0-flash no longer available"** (u/Bubbly-Wonder-2599, ~4 hrs ago) — Asking if 2.5 flash is ok. **We already use 2.5 — confirmed correct.**
+3. **"Need some help"** (u/Embarrassed_Pack4842, ~9 hrs ago) — HF gated access issue. Solved by accepting HF terms.
+4. Several logistics posts: remote access issues, online link questions, team pending status.
+5. **"Auto RAG & Local + hybrid Inference"** (u/Henrie_the_dreamer, 4 days ago) — Cactus v1.7 features.
+
+**Takeaway**: Most teams still setting up. No strategy tips or intel shared. We're well ahead with 89.15% score.
+
 ## Cactus HN Launch — Key Quote
 "We found Qwen3 600m to be great at tool calls for instance." — Could be worth exploring as alternative model, but requires download and different setup.
 
