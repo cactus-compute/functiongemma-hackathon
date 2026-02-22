@@ -43,8 +43,6 @@ function syncRag(profile) {
 router.post("/", (req, res) => {
   const { name, role, company, bio, skills, looking_for, can_help_with, domains, linkedin_url } =
     req.body;
-  if (!name || !role || !company || !bio) {
-    return res.status(400).json({ error: "name, role, company, bio are required" });
   }
   const id = uuidv4();
   const stmt = db.prepare(`
