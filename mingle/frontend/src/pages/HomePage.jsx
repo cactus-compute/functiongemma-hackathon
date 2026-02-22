@@ -19,7 +19,7 @@ const features = [
   },
   {
     icon: "~",
-    title: "Smart Query",
+    title: "Find my people",
     desc: "AI-ranked connection discovery",
     color: "#f59e0b",
     gradient: "linear-gradient(135deg, #f59e0b 0%, #d97706 100%)",

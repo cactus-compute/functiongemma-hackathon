@@ -1,0 +1,9 @@
+Name: Joe Thompson
+Role: VP Engineering
+Company: Cactus AI
+Bio: Leading the engineering team at Cactus AI. Passionate about on-device ML and edge computing.
+Skills: ML Infrastructure, Edge Computing, Team Building
+Looking For: Collaborators, Investors
+Can Help With: Technical advice, Mentorship, Introductions
+Domains: AI/ML, Hardware
+LinkedIn: https://linkedin.com/in/joethompson

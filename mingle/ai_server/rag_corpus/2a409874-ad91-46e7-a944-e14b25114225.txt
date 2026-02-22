@@ -1,0 +1,9 @@
+Name: Chris Wong
+Role: Product Designer
+Company: Notion
+Bio: 3 years designing productivity tools. Learning design systems and growing into senior roles.
+Skills: UI Design, Figma, Sketch, Basic Prototyping
+Looking For: Mentorship, Collaborators
+Can Help With: Design, Product feedback
+Domains: Consumer, Developer Tools
+LinkedIn: https://linkedin.com/in/chriswong

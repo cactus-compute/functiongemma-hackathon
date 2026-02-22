@@ -82,7 +82,7 @@ export default function SmartQuery() {
     <div style={{ maxWidth: "760px", margin: "0 auto", padding: "40px 20px" }}>
       <div style={{ display: "flex", alignItems: "center", gap: "16px", marginBottom: "28px" }}>
         <button onClick={() => navigate("/")} style={backBtn}>← Home</button>
-        <h1 style={{ fontSize: "1.8rem", fontWeight: 800 }}>Smart Query</h1>
+        <h1 style={{ fontSize: "1.8rem", fontWeight: 800 }}>Find my people</h1>
       </div>
 
       <div style={{

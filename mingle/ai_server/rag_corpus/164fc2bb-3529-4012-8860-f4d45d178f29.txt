@@ -1,0 +1,9 @@
+Name: Taylor Kim
+Role: Product Manager
+Company: Dropbox
+Bio: PM who works closely with design teams. Can give design feedback but not a hands-on designer.
+Skills: Product Strategy, User Research, Wireframing, Figma (basic)
+Looking For: Co-founder, Advice
+Can Help With: Product feedback, Design
+Domains: Consumer, Enterprise SaaS
+LinkedIn: https://linkedin.com/in/taylorkim

@@ -1,0 +1,9 @@
+Name: Robin Chen
+Role: Data Scientist
+Company: Databricks
+Bio: Data viz enthusiast. Can create charts and dashboards but not a product designer.
+Skills: Python, Data Visualization, D3.js, Tableau
+Looking For: Collaborators, Mentorship
+Can Help With: Technical advice, Design
+Domains: AI/ML, Enterprise SaaS
+LinkedIn: https://linkedin.com/in/robinchen
