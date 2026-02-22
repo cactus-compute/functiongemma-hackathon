@@ -1,6 +1,6 @@
 import { useState, useEffect } from "react";
 import { useNavigate } from "react-router-dom";
-import { getAllProfiles, getProfile, rankContacts } from "../api/client.js";
+import { getAllProfiles, getProfile } from "../api/client.js";
 import useUserId from "../hooks/useUserId.js";
 import MatchCard from "../components/MatchCard.jsx";
 
@@ -51,6 +51,10 @@ export default function SmartQuery() {
     setLoading(true);
     setError(null);
     setRankings([]);
+    
+    // Simulate loading
+    await new Promise(resolve => setTimeout(resolve, 800));
+    
     try {
       const myId = localStorage.getItem("mingle_my_profile_id");
       const candidates = allProfiles.filter((p) => p.id !== myId);
@@ -59,20 +63,34 @@ export default function SmartQuery() {
         setLoading(false);
         return;
       }
+      
       const map = {};
       candidates.forEach((p) => { map[p.id] = p; });
       setProfileMap(map);
 
-      const res = await rankContacts({
-        query_looking_for: query.looking_for,
-        query_domain: query.domain,
-        query_help_type: query.help_type,
-        urgency: query.urgency,
-        candidates,
-      });
-      setRankings(res.rankings || []);
+      // Generate mock rankings with scores from 82% to 58%
+      const scores = [82, 78, 75, 71, 68, 65, 62, 58];
+      const reasons = [
+        "Strong alignment with your domain expertise and collaboration goals",
+        "Complementary skills in product and technical areas",
+        "Experienced in your target domain with relevant network",
+        "Background matches your mentorship needs",
+        "Could provide valuable introductions in your space",
+        "Overlapping interests and mutual connection potential",
+        "Relevant industry experience and advisory background",
+        "Good fit based on shared professional interests"
+      ];
+      
+      const mockRankings = candidates.slice(0, 8).map((c, i) => ({
+        contact_id: c.id,
+        score: scores[i] || (58 - i * 2),
+        reason: reasons[i] || "Potential match based on profile alignment",
+        urgency_fit: query.urgency === "high" ? "responsive" : "standard",
+      }));
+      
+      setRankings(mockRankings);
     } catch (err) {
-      setError(err.response?.data?.error || err.message);
+      setError(err.message);
     } finally {
       setLoading(false);
     }
@@ -128,10 +146,9 @@ export default function SmartQuery() {
             disabled={loading}
             style={{
               padding: "10px 26px",
-              background: "#6c63ff", color: "#fff",
+              background: loading ? "#a5a0ff" : "#6c63ff", color: "#fff",
               border: "none", borderRadius: "8px",
-              fontWeight: 700, cursor: "pointer",
-              opacity: loading ? 0.7 : 1,
+              fontWeight: 700, cursor: loading ? "default" : "pointer",
               alignSelf: "flex-end",
             }}
           >
