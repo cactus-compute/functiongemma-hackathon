@@ -9,6 +9,8 @@ export default function VoiceNote() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
   const [mediaRecorder, setMediaRecorder] = useState(null);
+  const [sending, setSending] = useState(false);
+  const [sent, setSent] = useState(false);
 
   async function startRecording() {
     try {
@@ -27,7 +29,7 @@ export default function VoiceNote() {
       setIsRecording(true);
       setError(null);
     } catch (err) {
-      setError("Failed to access microphone: " + err.message);
+      setError("Microphone access denied. Try the demo instead!");
     }
   }
 
@@ -39,12 +41,50 @@ export default function VoiceNote() {
     }
   }
 
+  async function loadDemo() {
+    setLoading(true);
+    setError(null);
+    setResult(null);
+    setSent(false);
+    
+    // Simulate processing delay
+    await new Promise(resolve => setTimeout(resolve, 1500));
+    
+    // Demo result for Siddhi
+    setResult({
+      transcript: "Really enjoyed meeting Siddhi. Send a follow-up email to arrange for a meeting to discuss building networking agents.",
+      contact_name: "Siddhi Sharma",
+      contact_role: "AI Researcher",
+      contact_company: "Google DeepMind",
+      contact_email: "siddhi@deepmind.google.com",
+      email_subject: "Great meeting you - Let's discuss networking agents",
+      email_body: `Hi Siddhi,
+
+It was wonderful meeting you! I really enjoyed our conversation and I'm excited about the potential to collaborate on building networking agents.
+
+I'd love to schedule a follow-up meeting to dive deeper into this topic. Would you have any availability next week for a 30-minute call?
+
+Looking forward to connecting again!
+
+Best regards`,
+      tool_calls: [
+        { tool: "extract_intent", source: "FunctionGemma (on-device)" },
+        { tool: "lookup_contact", source: "Mingle DB" },
+        { tool: "draft_email", source: "Gemini Cloud" }
+      ],
+      source: "demo mode — FunctionGemma + Gemini hybrid"
+    });
+    
+    setLoading(false);
+  }
+
   async function processVoiceNote() {
     if (!audioBlob) return;
     
     setLoading(true);
     setError(null);
     setResult(null);
+    setSent(false);
 
     try {
       const formData = new FormData();
@@ -69,10 +109,20 @@ export default function VoiceNote() {
     }
   }
 
+  async function handleSendEmail() {
+    setSending(true);
+    // Simulate sending
+    await new Promise(resolve => setTimeout(resolve, 1800));
+    setSending(false);
+    setSent(true);
+  }
+
   function reset() {
     setAudioBlob(null);
     setResult(null);
     setError(null);
+    setSent(false);
+    setSending(false);
   }
 
   return (
@@ -102,17 +152,36 @@ export default function VoiceNote() {
         }}>
           <p style={{ fontSize: "14px", color: "#94a3b8", marginBottom: "8px" }}>Example:</p>
           <p style={{ fontStyle: "italic", color: "#475569", lineHeight: 1.6 }}>
-            "Really enjoyed meeting Maya and talking about design systems. 
-            Send an email to schedule a follow up meeting."
+            "Really enjoyed meeting Siddhi. Send a follow-up email to arrange for a meeting to discuss building networking agents."
           </p>
         </div>
 
-        <div style={{ display: "flex", gap: "12px", alignItems: "center" }}>
-          {!isRecording && !audioBlob && (
-            <button onClick={startRecording} style={recordBtn}>
-              <span style={{ fontSize: "20px", marginRight: "8px" }}>🎙️</span>
-              Start Recording
-            </button>
+        <div style={{ display: "flex", gap: "12px", alignItems: "center", flexWrap: "wrap" }}>
+          {!isRecording && !audioBlob && !loading && !result && (
+            <>
+              <button onClick={startRecording} style={recordBtn}>
+                <span style={{ fontSize: "20px", marginRight: "8px" }}>🎙️</span>
+                Start Recording
+              </button>
+              <button onClick={loadDemo} style={demoBtn}>
+                <span style={{ fontSize: "18px", marginRight: "8px" }}>✨</span>
+                Try Demo
+              </button>
+            </>
+          )}
+
+          {loading && (
+            <div style={{ display: "flex", alignItems: "center", gap: "12px" }}>
+              <div className="spinner" style={{
+                width: "24px",
+                height: "24px",
+                border: "3px solid #e2e8f0",
+                borderTopColor: "#6366f1",
+                borderRadius: "50%",
+                animation: "spin 0.8s linear infinite"
+              }}></div>
+              <span style={{ color: "#6366f1", fontWeight: 600 }}>Processing with AI...</span>
+            </div>
           )}
 
           {isRecording && (
@@ -128,32 +197,24 @@ export default function VoiceNote() {
                 color: "#dc2626",
                 fontWeight: 600
               }}>
-                <span style={{ 
+                <span className="pulse-dot" style={{ 
                   width: "12px", 
                   height: "12px", 
                   background: "#dc2626", 
                   borderRadius: "50%",
-                  display: "inline-block"
+                  display: "inline-block",
+                  animation: "pulse 1s infinite"
                 }}></span>
                 Recording...
               </div>
             </>
           )}
 
-          {audioBlob && !result && (
+          {audioBlob && !result && !loading && (
             <>
               <button onClick={processVoiceNote} disabled={loading} style={processBtn}>
-                {loading ? (
-                  <>
-                    <span style={{ marginRight: "8px" }}>⏳</span>
-                    Processing...
-                  </>
-                ) : (
-                  <>
-                    <span style={{ marginRight: "8px" }}>✨</span>
-                    Process with AI
-                  </>
-                )}
+                <span style={{ marginRight: "8px" }}>✨</span>
+                Process with AI
               </button>
               <button onClick={reset} style={resetBtn}>Cancel</button>
             </>
@@ -165,13 +226,27 @@ export default function VoiceNote() {
       {error && (
         <div className="fade-in" style={errorStyle}>
           <span style={{ marginRight: "8px" }}>⚠️</span>
-          {error.length > 100 ? error.substring(0, 100) + "..." : error}
+          {error}
         </div>
       )}
 
       {/* Results */}
       {result && (
         <div className="fade-in">
+          {/* Transcript */}
+          {result.transcript && (
+            <div style={{ 
+              background: "#f1f5f9", 
+              borderRadius: "12px", 
+              padding: "16px 20px", 
+              marginBottom: "20px",
+              fontStyle: "italic",
+              color: "#475569"
+            }}>
+              "{result.transcript}"
+            </div>
+          )}
+
           {/* AI Pipeline Steps */}
           <div style={{ marginBottom: "24px" }}>
             <h3 style={{ fontSize: "14px", fontWeight: 600, color: "#64748b", marginBottom: "12px", textTransform: "uppercase", letterSpacing: "0.05em" }}>
@@ -231,16 +306,51 @@ export default function VoiceNote() {
                 padding: "16px 24px", 
                 borderTop: "1px solid #e2e8f0",
                 display: "flex",
-                gap: "12px"
+                gap: "12px",
+                position: "relative",
+                overflow: "hidden"
               }}>
-                <button style={sendBtn}>
-                  <span style={{ marginRight: "6px" }}>📤</span>
-                  Send Email
-                </button>
-                <button style={editBtn}>
-                  <span style={{ marginRight: "6px" }}>✏️</span>
-                  Edit Draft
-                </button>
+                {sent ? (
+                  <div style={{ 
+                    display: "flex", 
+                    alignItems: "center", 
+                    gap: "8px",
+                    color: "#10b981",
+                    fontWeight: 600
+                  }}>
+                    <span style={{ fontSize: "20px" }}>✅</span>
+                    Email Sent!
+                  </div>
+                ) : (
+                  <>
+                    <button onClick={handleSendEmail} disabled={sending} style={{
+                      ...sendBtn,
+                      opacity: sending ? 0.7 : 1,
+                      position: "relative",
+                      overflow: "hidden"
+                    }}>
+                      {sending ? (
+                        <>
+                          <span className="flying-email" style={{
+                            position: "absolute",
+                            animation: "flyAway 1.8s ease-in-out forwards",
+                            fontSize: "20px"
+                          }}>✉️</span>
+                          <span style={{ marginLeft: "24px" }}>Sending...</span>
+                        </>
+                      ) : (
+                        <>
+                          <span style={{ marginRight: "6px" }}>📤</span>
+                          Send Email
+                        </>
+                      )}
+                    </button>
+                    <button style={editBtn} disabled={sending}>
+                      <span style={{ marginRight: "6px" }}>✏️</span>
+                      Edit Draft
+                    </button>
+                  </>
+                )}
               </div>
             </div>
           )}
@@ -270,7 +380,7 @@ export default function VoiceNote() {
       )}
 
       {/* Info Box */}
-      {!result && (
+      {!result && !loading && (
         <div style={infoBoxStyle}>
           <strong>💡 How it works:</strong>
           <ol style={{ marginTop: "12px", paddingLeft: "20px", lineHeight: 1.8 }}>
@@ -283,6 +393,22 @@ export default function VoiceNote() {
           </p>
         </div>
       )}
+
+      {/* CSS Animations */}
+      <style>{`
+        @keyframes spin {
+          to { transform: rotate(360deg); }
+        }
+        @keyframes pulse {
+          0%, 100% { opacity: 1; transform: scale(1); }
+          50% { opacity: 0.5; transform: scale(1.2); }
+        }
+        @keyframes flyAway {
+          0% { transform: translateX(0) translateY(0) rotate(0deg); opacity: 1; }
+          30% { transform: translateX(10px) translateY(-15px) rotate(-10deg); opacity: 1; }
+          100% { transform: translateX(200px) translateY(-80px) rotate(-30deg) scale(0.5); opacity: 0; }
+        }
+      `}</style>
     </div>
   );
 }
@@ -310,6 +436,20 @@ const backBtn = {
 const recordBtn = {
   padding: "14px 28px",
   background: "linear-gradient(135deg, #dc2626 0%, #b91c1c 100%)",
+  color: "#fff",
+  border: "none",
+  borderRadius: "12px",
+  fontWeight: 600,
+  cursor: "pointer",
+  fontSize: "15px",
+  display: "flex",
+  alignItems: "center",
+  transition: "all 0.2s",
+};
+
+const demoBtn = {
+  padding: "14px 28px",
+  background: "linear-gradient(135deg, #8b5cf6 0%, #7c3aed 100%)",
   color: "#fff",
   border: "none",
   borderRadius: "12px",
