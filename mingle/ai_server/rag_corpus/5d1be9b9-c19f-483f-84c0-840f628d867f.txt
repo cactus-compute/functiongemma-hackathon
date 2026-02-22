@@ -1,0 +1,9 @@
+Name: Maya Patel
+Role: Principal Product Designer
+Company: Figma
+Bio: 10+ years designing world-class products. Led design systems at Airbnb and Figma. Passionate about accessible, delightful UX.
+Skills: UI/UX Design, Design Systems, Figma, User Research, Prototyping, Visual Design, Interaction Design
+Looking For: Collaborators, Mentorship
+Can Help With: Design, Product feedback, Technical advice
+Domains: AI/ML, Consumer, Developer Tools
+LinkedIn: https://linkedin.com/in/mayapatel

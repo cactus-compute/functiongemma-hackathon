@@ -1,0 +1,9 @@
+Name: Sam Martinez
+Role: Frontend Engineer
+Company: Vercel
+Bio: Frontend dev with an eye for design. Can implement designs well and give basic UI feedback.
+Skills: React, CSS, Tailwind, Basic UI sense
+Looking For: Collaborators, Co-founder
+Can Help With: Technical advice, Design
+Domains: Developer Tools, AI/ML
+LinkedIn: https://linkedin.com/in/sammartinez

@@ -1,0 +1,9 @@
+Name: Jordan Lee
+Role: Senior UX Designer
+Company: Stripe
+Bio: Designing fintech experiences that simplify complexity. Strong in user research and interaction design.
+Skills: UX Design, User Research, Figma, Prototyping, Wireframing
+Looking For: Co-founder, Collaborators
+Can Help With: Design, Product feedback
+Domains: FinTech, Enterprise SaaS
+LinkedIn: https://linkedin.com/in/jordanlee
