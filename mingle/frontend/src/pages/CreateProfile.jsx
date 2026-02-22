@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { useNavigate } from "react-router-dom";
 import { createProfile } from "../api/client.js";
 
@@ -112,6 +112,18 @@ export default function CreateProfile() {
   function set(field) {
     return (val) => setForm((prev) => ({ ...prev, [field]: val }));
   }
+
+  // Auto-fill LinkedIn URL based on name (only if empty or auto-generated)
+  const [linkedinManuallyEdited, setLinkedinManuallyEdited] = useState(false);
+  
+  useEffect(() => {
+    if (form.name && !linkedinManuallyEdited) {
+      const slug = form.name.toLowerCase().replace(/\s+/g, "-").replace(/[^a-z0-9-]/g, "");
+      if (slug) {
+        setForm(prev => ({ ...prev, linkedin_url: "https://linkedin.com/in/" + slug }));
+      }
+    }
+  }, [form.name, linkedinManuallyEdited]);
 
   async function handleSubmit(e) {
     e.preventDefault();
@@ -261,7 +273,10 @@ export default function CreateProfile() {
           <input
             style={inputStyle}
             value={form.linkedin_url}
-            onChange={(e) => set("linkedin_url")(e.target.value)}
+            onChange={(e) => {
+              set("linkedin_url")(e.target.value);
+              setLinkedinManuallyEdited(true);
+            }}
             placeholder="https://linkedin.com/in/your-profile"
             type="url"
           />
