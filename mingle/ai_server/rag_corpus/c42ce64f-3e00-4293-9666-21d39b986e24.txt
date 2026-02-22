@@ -1,0 +1,9 @@
+Name: Siddhi Sharma
+Role: AI Researcher
+Company: Google DeepMind
+Bio: Working on agentic AI and multi-modal reasoning
+Skills: PyTorch, Transformers, RL
+Looking For: Collaborators
+Can Help With: Technical advice
+Domains: AI/ML
+LinkedIn: 
